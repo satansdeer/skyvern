@@ -545,3 +545,11 @@ class FailedToParseActionInstruction(SkyvernException):
 class UnsupportedTaskType(SkyvernException):
     def __init__(self, task_type: str):
         super().__init__(f"Not supported task type [{task_type}]")
+
+
+class BrowserSessionNotFound(SkyvernHTTPException):
+    def __init__(self, browser_session_id: str):
+        super().__init__(
+            f"Browser session not found. browser_session_id={browser_session_id}",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
