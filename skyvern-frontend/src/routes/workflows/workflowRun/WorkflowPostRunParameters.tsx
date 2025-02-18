@@ -44,6 +44,15 @@ function WorkflowPostRunParameters() {
   }
 
   const activeBlock = getActiveBlock();
+  const isObserverTask = workflowRun.observer_task !== null;
+
+  const webhookCallbackUrl = isObserverTask
+    ? workflowRun.observer_task?.webhook_callback_url
+    : workflowRun.webhook_callback_url;
+
+  const proxyLocation = isObserverTask
+    ? workflowRun.observer_task?.proxy_location
+    : workflowRun.proxy_location;
 
   return (
     <div className="space-y-5">
@@ -125,14 +134,14 @@ function WorkflowPostRunParameters() {
             <div className="w-80">
               <h1 className="text-lg">Webhook Callback URL</h1>
             </div>
-            <Input value={workflowRun.webhook_callback_url ?? ""} readOnly />
+            <Input value={webhookCallbackUrl ?? ""} readOnly />
           </div>
           <div className="flex gap-16">
             <div className="w-80">
               <h1 className="text-lg">Proxy Location</h1>
             </div>
             <ProxySelector
-              value={workflowRun.proxy_location ?? ProxyLocation.Residential}
+              value={proxyLocation ?? ProxyLocation.Residential}
               onChange={() => {
                 // TODO
               }}
@@ -140,19 +149,19 @@ function WorkflowPostRunParameters() {
           </div>
         </div>
       </div>
-      {workflowRun.observer_cruise ? (
+      {workflowRun.observer_task ? (
         <div className="rounded bg-slate-elevation2 p-6">
           <div className="space-y-4">
-            <h1 className="text-lg font-bold">Observer Parameters</h1>
+            <h1 className="text-lg font-bold">Task 2.0 Parameters</h1>
             <div className="flex gap-16">
               <div className="w-80">
-                <h1 className="text-lg">Observer Prompt</h1>
+                <h1 className="text-lg">Task 2.0 Prompt</h1>
                 <h2 className="text-base text-slate-400">
-                  The original prompt for the observer
+                  The original prompt for the task
                 </h2>
               </div>
               <AutoResizingTextarea
-                value={workflowRun.observer_cruise.prompt ?? ""}
+                value={workflowRun.observer_task.prompt ?? ""}
                 readOnly
               />
             </div>

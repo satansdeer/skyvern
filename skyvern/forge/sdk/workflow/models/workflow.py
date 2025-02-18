@@ -5,7 +5,7 @@ from typing import Any, List
 from pydantic import BaseModel, field_validator
 
 from skyvern.forge.sdk.core.validators import validate_url
-from skyvern.forge.sdk.schemas.observers import ObserverCruise
+from skyvern.forge.sdk.schemas.observers import ObserverTask
 from skyvern.forge.sdk.schemas.tasks import ProxyLocation
 from skyvern.forge.sdk.workflow.exceptions import WorkflowDefinitionHasDuplicateBlockLabels
 from skyvern.forge.sdk.workflow.models.block import BlockTypeVar
@@ -50,6 +50,12 @@ class WorkflowDefinition(BaseModel):
             raise WorkflowDefinitionHasDuplicateBlockLabels(duplicate_labels)
 
 
+class WorkflowStatus(StrEnum):
+    published = "published"
+    draft = "draft"
+    auto_generated = "auto_generated"
+
+
 class Workflow(BaseModel):
     workflow_id: str
     organization_id: str
@@ -64,6 +70,7 @@ class Workflow(BaseModel):
     totp_verification_url: str | None = None
     totp_identifier: str | None = None
     persist_browser_session: bool = False
+    status: WorkflowStatus = WorkflowStatus.published
 
     created_at: datetime
     modified_at: datetime
@@ -101,6 +108,8 @@ class WorkflowRun(BaseModel):
     totp_verification_url: str | None = None
     totp_identifier: str | None = None
     failure_reason: str | None = None
+    parent_workflow_run_id: str | None = None
+    workflow_title: str | None = None
 
     created_at: datetime
     modified_at: datetime
@@ -138,4 +147,5 @@ class WorkflowRunStatusResponse(BaseModel):
     outputs: dict[str, Any] | None = None
     total_steps: int | None = None
     total_cost: float | None = None
-    observer_cruise: ObserverCruise | None = None
+    observer_task: ObserverTask | None = None
+    workflow_title: str | None = None

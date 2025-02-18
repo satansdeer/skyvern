@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import status
 
 
@@ -29,11 +31,13 @@ class FailedToSendWebhook(SkyvernException):
         task_id: str | None = None,
         workflow_run_id: str | None = None,
         workflow_id: str | None = None,
+        observer_cruise_id: str | None = None,
     ):
         workflow_run_str = f"workflow_run_id={workflow_run_id}" if workflow_run_id else ""
         workflow_str = f"workflow_id={workflow_id}" if workflow_id else ""
         task_str = f"task_id={task_id}" if task_id else ""
-        super().__init__(f"Failed to send webhook. {workflow_run_str} {workflow_str} {task_str}")
+        observer_cruise_str = f"observer_cruise_id={observer_cruise_id}" if observer_cruise_id else ""
+        super().__init__(f"Failed to send webhook. {workflow_run_str} {workflow_str} {task_str} {observer_cruise_str}")
 
 
 class ProxyLocationNotSupportedError(SkyvernException):
@@ -148,7 +152,8 @@ class WorkflowRunNotFound(SkyvernHTTPException):
 class MissingValueForParameter(SkyvernHTTPException):
     def __init__(self, parameter_key: str, workflow_id: str, workflow_run_id: str) -> None:
         super().__init__(
-            f"Missing value for parameter {parameter_key} in workflow run {workflow_run_id} of workflow {workflow_id}"
+            f"Missing value for parameter {parameter_key} in workflow run {workflow_run_id} of workflow {workflow_id}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
 
@@ -250,6 +255,12 @@ class DownloadFileMaxSizeExceeded(SkyvernException):
         super().__init__(f"Download file size exceeded the maximum allowed size of {max_size} MB.")
 
 
+class DownloadFileMaxWaitingTime(SkyvernException):
+    def __init__(self, downloading_files: list[Path]) -> None:
+        self.downloading_files = downloading_files
+        super().__init__(f"Long-time downloading files [{downloading_files}].")
+
+
 class NoFileDownloadTriggered(SkyvernException):
     def __init__(self, element_id: str) -> None:
         super().__init__(f"Clicking on element doesn't trigger the file download. element_id={element_id}")
@@ -299,6 +310,16 @@ class BitwardenAccessDeniedError(BitwardenBaseError):
         )
 
 
+class CredentialParameterParsingError(SkyvernException):
+    def __init__(self, message: str) -> None:
+        super().__init__(f"Error parsing credential parameter: {message}")
+
+
+class CredentialParameterNotFoundError(SkyvernException):
+    def __init__(self, credential_parameter_id: str) -> None:
+        super().__init__(f"Could not find credential parameter: {credential_parameter_id}")
+
+
 class UnknownElementTreeFormat(SkyvernException):
     def __init__(self, fmt: str) -> None:
         super().__init__(f"Unknown element tree format {fmt}")
@@ -307,6 +328,13 @@ class UnknownElementTreeFormat(SkyvernException):
 class StepTerminationError(SkyvernException):
     def __init__(self, step_id: str, reason: str) -> None:
         super().__init__(f"Step {step_id} cannot be executed and task is failed. Reason: {reason}")
+
+
+class BlockTerminationError(SkyvernException):
+    def __init__(self, workflow_run_block_id: str, workflow_run_id: str, reason: str) -> None:
+        super().__init__(
+            f"Block {workflow_run_block_id} cannot be executed and workflow run {workflow_run_id} is failed. Reason: {reason}"
+        )
 
 
 class StepUnableToExecuteError(SkyvernException):
@@ -400,6 +428,11 @@ class TaskAlreadyCanceled(SkyvernHTTPException):
         )
 
 
+class TaskAlreadyTimeout(SkyvernException):
+    def __init__(self, task_id: str):
+        super().__init__(f"Task {task_id} is timed out")
+
+
 class InvalidTaskStatusTransition(SkyvernHTTPException):
     def __init__(self, old_status: str, new_status: str, task_id: str):
         super().__init__(f"Invalid task status transition from {old_status} to {new_status} for {task_id}")
@@ -437,7 +470,7 @@ class FailedToFetchSecret(SkyvernException):
 class NoIncrementalElementFoundForCustomSelection(SkyvernException):
     def __init__(self, element_id: str) -> None:
         super().__init__(
-            f"No incremental element found, maybe try an input action or taking the select action on other elements. element_id={element_id}"
+            f"No incremental element found, try it again later or try another element. element_id={element_id}"
         )
 
 
@@ -557,3 +590,28 @@ class InteractWithDropdownContainer(SkyvernException):
 class UrlGenerationFailure(SkyvernHTTPException):
     def __init__(self) -> None:
         super().__init__("Failed to generate the url for the prompt")
+
+
+class ObserverCruiseNotFound(SkyvernHTTPException):
+    def __init__(self, observer_cruise_id: str) -> None:
+        super().__init__(f"Observer task {observer_cruise_id} not found")
+
+
+class NoTOTPVerificationCodeFound(SkyvernHTTPException):
+    def __init__(
+        self,
+        task_id: str | None = None,
+        workflow_run_id: str | None = None,
+        totp_verification_url: str | None = None,
+        totp_identifier: str | None = None,
+    ) -> None:
+        msg = "No TOTP verification code found."
+        if task_id:
+            msg += f" task_id={task_id}"
+        if workflow_run_id:
+            msg += f" workflow_run_id={workflow_run_id}"
+        if totp_verification_url:
+            msg += f" totp_verification_url={totp_verification_url}"
+        if totp_identifier:
+            msg += f" totp_identifier={totp_identifier}"
+        super().__init__(msg)

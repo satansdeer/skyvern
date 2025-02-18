@@ -68,6 +68,28 @@ const nodeLibraryItems: Array<{
     description: "Takes actions or extracts information",
   },
   {
+    nodeType: "taskv2",
+    icon: (
+      <WorkflowBlockIcon
+        workflowBlockType={WorkflowBlockTypes.Taskv2}
+        className="size-6"
+      />
+    ),
+    title: "Task v2 Block",
+    description: "Runs a Skyvern v2 Task",
+  },
+  {
+    nodeType: "url",
+    icon: (
+      <WorkflowBlockIcon
+        workflowBlockType={WorkflowBlockTypes.URL}
+        className="size-6"
+      />
+    ),
+    title: "Go to URL Block",
+    description: "Navigates to a URL",
+  },
+  {
     nodeType: "textPrompt",
     icon: (
       <WorkflowBlockIcon
@@ -120,6 +142,17 @@ const nodeLibraryItems: Array<{
     ),
     title: "File Parser Block",
     description: "Downloads and parses a file",
+  },
+  {
+    nodeType: "pdfParser",
+    icon: (
+      <WorkflowBlockIcon
+        workflowBlockType={WorkflowBlockTypes.PDFParser}
+        className="size-6"
+      />
+    ),
+    title: "PDF Parser Block",
+    description: "Downloads and parses a PDF file with an optional data schema",
   },
   // disabled
   // {
@@ -209,7 +242,7 @@ function WorkflowNodeLibraryPanel({ onNodeClick, first }: Props) {
           </div>
           <span className="text-sm text-slate-400">
             {first
-              ? "Click on the node type to add your first node"
+              ? "Click on the node type to add your first block"
               : "Click on the node type you want to add"}
           </span>
         </header>
@@ -241,7 +274,7 @@ function WorkflowNodeLibraryPanel({ onNodeClick, first }: Props) {
                     }}
                   >
                     <div className="flex gap-2">
-                      <div className="flex h-[2.75rem] w-[2.75rem] items-center justify-center rounded border border-slate-600">
+                      <div className="flex h-[2.75rem] w-[2.75rem] shrink-0 items-center justify-center rounded border border-slate-600">
                         {item.icon}
                       </div>
                       <div className="flex flex-col gap-1">
@@ -253,7 +286,7 @@ function WorkflowNodeLibraryPanel({ onNodeClick, first }: Props) {
                         </span>
                       </div>
                     </div>
-                    <PlusIcon className="size-6" />
+                    <PlusIcon className="size-6 shrink-0" />
                   </div>
                 );
               })}

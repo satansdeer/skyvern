@@ -22,7 +22,8 @@ export type ParameterYAML =
   | AWSSecretParameterYAML
   | ContextParameterYAML
   | OutputParameterYAML
-  | BitwardenSensitiveInformationParameterYAML;
+  | BitwardenSensitiveInformationParameterYAML
+  | BitwardenCreditCardDataParameterYAML;
 
 export type ParameterYAMLBase = {
   parameter_type: string;
@@ -40,9 +41,9 @@ export type BitwardenLoginCredentialParameterYAML = ParameterYAMLBase & {
   parameter_type: "bitwarden_login_credential";
   bitwarden_collection_id: string;
   url_parameter_key: string;
-  bitwarden_client_id_aws_secret_key: "SKYVERN_BITWARDEN_CLIENT_ID";
-  bitwarden_client_secret_aws_secret_key: "SKYVERN_BITWARDEN_CLIENT_SECRET";
-  bitwarden_master_password_aws_secret_key: "SKYVERN_BITWARDEN_MASTER_PASSWORD";
+  bitwarden_client_id_aws_secret_key: string;
+  bitwarden_client_secret_aws_secret_key: string;
+  bitwarden_master_password_aws_secret_key: string;
 };
 
 export type AWSSecretParameterYAML = ParameterYAMLBase & {
@@ -55,6 +56,18 @@ export type BitwardenSensitiveInformationParameterYAML = ParameterYAMLBase & {
   bitwarden_collection_id: string;
   bitwarden_identity_key: string;
   bitwarden_identity_fields: Array<string>;
+  bitwarden_client_id_aws_secret_key: string;
+  bitwarden_client_secret_aws_secret_key: string;
+  bitwarden_master_password_aws_secret_key: string;
+};
+
+export type BitwardenCreditCardDataParameterYAML = ParameterYAMLBase & {
+  parameter_type: "bitwarden_credit_card_data";
+
+  // bitwarden ids for the credit card item
+  bitwarden_collection_id: string;
+  bitwarden_item_id: string;
+
   bitwarden_client_id_aws_secret_key: string;
   bitwarden_client_secret_aws_secret_key: string;
   bitwarden_master_password_aws_secret_key: string;
@@ -84,7 +97,10 @@ export type BlockYAML =
   | ExtractionBlockYAML
   | LoginBlockYAML
   | WaitBlockYAML
-  | FileDownloadBlockYAML;
+  | FileDownloadBlockYAML
+  | PDFParserBlockYAML
+  | Taskv2BlockYAML
+  | URLBlockYAML;
 
 export type BlockYAMLBase = {
   block_type: WorkflowBlockType;
@@ -110,6 +126,15 @@ export type TaskBlockYAML = BlockYAMLBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+};
+
+export type Taskv2BlockYAML = BlockYAMLBase & {
+  block_type: "task_v2";
+  url: string | null;
+  prompt: string;
+  totp_verification_url: string | null;
+  totp_identifier: string | null;
+  max_iterations: number | null;
 };
 
 export type ValidationBlockYAML = BlockYAMLBase & {
@@ -248,7 +273,19 @@ export type FileUrlParserBlockYAML = BlockYAMLBase & {
 
 export type ForLoopBlockYAML = BlockYAMLBase & {
   block_type: "for_loop";
-  loop_over_parameter_key: string;
+  loop_over_parameter_key?: string;
   loop_blocks: Array<BlockYAML>;
   loop_variable_reference: string | null;
+  complete_if_empty: boolean;
+};
+
+export type PDFParserBlockYAML = BlockYAMLBase & {
+  block_type: "pdf_parser";
+  file_url: string;
+  json_schema: Record<string, unknown> | null;
+};
+
+export type URLBlockYAML = BlockYAMLBase & {
+  block_type: "goto_url";
+  url: string;
 };

@@ -1,6 +1,27 @@
 // we only use chromium browser for now
 let browserNameForWorkarounds = "chromium";
 
+class SafeCounter {
+  constructor() {
+    this.value = 0;
+    this.lock = Promise.resolve();
+  }
+
+  async add() {
+    await this.lock;
+    this.lock = new Promise((resolve) => {
+      this.value += 1;
+      resolve();
+    });
+    return this.value;
+  }
+
+  async get() {
+    await this.lock;
+    return this.value;
+  }
+}
+
 // Commands for manipulating rects.
 // Want to debug this? Run chromium, go to sources, and create a new snippet with the code in domUtils.js
 class Rect {
@@ -594,6 +615,14 @@ function isInteractable(element, hoverStylesMap) {
     return false;
   }
 
+  if (tagName === "frameset") {
+    return false;
+  }
+
+  if (tagName === "frame") {
+    return false;
+  }
+
   if (tagName === "a" && element.href) {
     return true;
   }
@@ -692,7 +721,8 @@ function isInteractable(element, hoverStylesMap) {
     tagName === "a" ||
     tagName === "i" ||
     tagName === "li" ||
-    tagName === "p"
+    tagName === "p" ||
+    tagName === "td"
   ) {
     const elementCursor = getElementComputedStyle(element)?.cursor;
     if (elementCursor === "pointer") {
@@ -702,20 +732,25 @@ function isInteractable(element, hoverStylesMap) {
     // Check if element has hover styles that change cursor to pointer
     // This is to handle the case where an element's cursor is "auto", but resolves to "pointer" on hover
     if (elementCursor === "auto") {
+      // TODO: we need a better algorithm to match the selector with better performance
       for (const [selector, styles] of hoverStylesMap) {
-        if (element.matches(selector) && styles.cursor === "pointer") {
-          return true;
+        let shouldMatch = false;
+        for (const className of element.classList) {
+          if (selector.includes(className)) {
+            shouldMatch = true;
+            break;
+          }
+        }
+        if (shouldMatch || selector.includes(tagName)) {
+          if (element.matches(selector) && styles.cursor === "pointer") {
+            return true;
+          }
         }
       }
     }
 
     // FIXME: hardcode to fix the bug about hover style now
     if (element.className.toString().includes("hover:cursor-pointer")) {
-      return true;
-    }
-
-    // auto for <a> is equal to pointer for <a>
-    if (tagName == "a" && elementCursor === "auto") {
       return true;
     }
   }
@@ -986,7 +1021,7 @@ function getElementContext(element, stopped_element) {
     let childContext = "";
     if (child.nodeType === Node.TEXT_NODE && isElementVisible(element)) {
       if (!element.hasAttribute("unique_id")) {
-        childContext = getVisibleText(child).trim();
+        childContext = getElementText(child).trim();
       }
     } else if (child.nodeType === Node.ELEMENT_NODE) {
       if (!child.hasAttribute("unique_id") && isElementVisible(child)) {
@@ -1023,13 +1058,30 @@ function getVisibleText(element) {
   return visibleText.join(" ");
 }
 
+// only get text from element itself
+function getElementText(element) {
+  if (element.nodeType === Node.TEXT_NODE) {
+    return element.data.trim();
+  }
+
+  let visibleText = [];
+  for (let i = 0; i < element.childNodes.length; i++) {
+    var node = element.childNodes[i];
+    let nodeText = "";
+    if (node.nodeType === Node.TEXT_NODE && (nodeText = node.data.trim())) {
+      visibleText.push(nodeText);
+    }
+  }
+  return visibleText.join(";");
+}
+
 function getElementContent(element, skipped_element = null) {
   // DFS to get all the text content from all the nodes under the element
   if (skipped_element && element === skipped_element) {
     return "";
   }
 
-  let textContent = getVisibleText(element);
+  let textContent = getElementText(element);
   let nodeContent = "";
   // if element has children, then build a list of text and join with a semicolon
   if (element.childNodes.length > 0) {
@@ -1038,7 +1090,7 @@ function getElementContent(element, skipped_element = null) {
     for (var child of element.childNodes) {
       let childText = "";
       if (child.nodeType === Node.TEXT_NODE) {
-        childText = getVisibleText(child).trim();
+        childText = getElementText(child).trim();
         if (childText.length > 0) {
           nodeTextContentList.push(childText);
         }
@@ -1110,19 +1162,52 @@ function getDOMElementBySkyvenElement(elementObj) {
   return document.querySelector(`[unique_id="${elementObj.id}"]`);
 }
 
-function uniqueId() {
+if (window.elementIdCounter === undefined) {
+  window.elementIdCounter = new SafeCounter();
+}
+
+// generate a unique id for the element
+// length is 4, the first character is from the frame index, the last 3 characters are from the counter,
+async function uniqueId() {
   const characters =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const base = characters.length;
+
+  const extraCharacters = "~!@#$%^&*()-_+=";
+  const extraBase = extraCharacters.length;
+
   let result = "";
-  for (let i = 0; i < 4; i++) {
-    const randomIndex = Math.floor(Math.random() * characters.length);
-    result += characters[randomIndex];
+
+  if (
+    window.GlobalSkyvernFrameIndex === undefined ||
+    window.GlobalSkyvernFrameIndex < 0
+  ) {
+    const randomIndex = Math.floor(Math.random() * extraBase);
+    result += extraCharacters[randomIndex];
+  } else {
+    const c1 = window.GlobalSkyvernFrameIndex % base;
+    result += characters[c1];
   }
+
+  const countPart =
+    (await window.elementIdCounter.add()) % (base * base * base);
+  const c2 = Math.floor(countPart / (base * base));
+  result += characters[c2];
+  const c3 = Math.floor(countPart / base) % base;
+  result += characters[c3];
+  const c4 = countPart % base;
+  result += characters[c4];
+
   return result;
 }
 
-function buildElementObject(frame, element, interactable, purgeable = false) {
-  var element_id = element.getAttribute("unique_id") ?? uniqueId();
+async function buildElementObject(
+  frame,
+  element,
+  interactable,
+  purgeable = false,
+) {
+  var element_id = element.getAttribute("unique_id") ?? (await uniqueId());
   var elementTagNameLower = element.tagName.toLowerCase();
   element.setAttribute("unique_id", element_id);
 
@@ -1193,11 +1278,12 @@ function buildElementObject(frame, element, interactable, purgeable = false) {
   let elementObj = {
     id: element_id,
     frame: frame,
+    frame_index: window.GlobalSkyvernFrameIndex,
     interactable: interactable,
     tagName: elementTagNameLower,
     attributes: attrs,
     beforePseudoText: getPseudoContent(element, "::before"),
-    text: getElementContent(element),
+    text: getElementText(element),
     afterPseudoText: getPseudoContent(element, "::after"),
     children: [],
     rect: DomUtils.getVisibleClientRect(element, true),
@@ -1222,7 +1308,7 @@ function buildElementObject(frame, element, interactable, purgeable = false) {
     let shadowHostId = shadowHostEle.getAttribute("unique_id");
     // assign shadowHostId to the shadowHost element if it doesn't have unique_id
     if (!shadowHostId) {
-      shadowHostId = uniqueId();
+      shadowHostId = await uniqueId();
       shadowHostEle.setAttribute("unique_id", shadowHostId);
     }
     elementObj.shadowHost = shadowHostId;
@@ -1245,11 +1331,25 @@ function buildElementObject(frame, element, interactable, purgeable = false) {
   return elementObj;
 }
 
-function buildTreeFromBody(frame = "main.frame") {
-  return buildElementTree(document.body, frame);
+// build the element tree for the body
+async function buildTreeFromBody(
+  frame = "main.frame",
+  frame_index = undefined,
+) {
+  if (
+    window.GlobalSkyvernFrameIndex === undefined &&
+    frame_index !== undefined
+  ) {
+    window.GlobalSkyvernFrameIndex = frame_index;
+  }
+  return await buildElementTree(document.body, frame);
 }
 
-function buildElementTree(starter = document.body, frame, full_tree = false) {
+async function buildElementTree(
+  starter = document.body,
+  frame,
+  full_tree = false,
+) {
   // Generate hover styles map at the start
   const hoverStylesMap = getHoverStylesMap();
 
@@ -1263,150 +1363,104 @@ function buildElementTree(starter = document.body, frame, full_tree = false) {
       return [];
     }
   }
-  function processElement(element, parentId) {
+  async function processElement(element, parentId) {
     if (element === null) {
       console.log("get a null element");
       return;
     }
 
+    const tagName = element.tagName.toLowerCase();
+
     // skip proccessing option element as they are already added to the select.options
-    if (element.tagName.toLowerCase() === "option") {
+    if (tagName === "option") {
       return;
     }
 
     // if element is an "a" tag and has a target="_blank" attribute, remove the target attribute
     // We're doing this so that skyvern can do all the navigation in a single page/tab and not open new tab
-    if (element.tagName.toLowerCase() === "a") {
+    if (tagName === "a") {
       if (element.getAttribute("target") === "_blank") {
         element.removeAttribute("target");
       }
     }
 
-    // Check if the element is interactable
-    if (isInteractable(element, hoverStylesMap)) {
-      var elementObj = buildElementObject(frame, element, true);
-      elements.push(elementObj);
-      // If the element is interactable but has no interactable parent,
-      // then it starts a new tree, so add it to the result array
-      // and set its id as the interactable parent id for the next elements
-      // under it
-      if (parentId === null) {
-        resultArray.push(elementObj);
-      }
-      // If the element is interactable and has an interactable parent,
-      // then add it to the children of the parent
-      else {
-        // TODO: use dict/object so that we access these in O(1) instead
-        elements
-          .find((element) => element.id === parentId)
-          .children.push(elementObj);
-      }
-      // Recursively process the children of the element
-      const children = getChildElements(element);
-      for (let i = 0; i < children.length; i++) {
-        const childElement = children[i];
-        processElement(childElement, elementObj.id);
-      }
-      return elementObj;
-    } else if (element.tagName.toLowerCase() === "iframe") {
-      let iframeElementObject = buildElementObject(frame, element, false);
-
-      elements.push(iframeElementObject);
-      resultArray.push(iframeElementObject);
-    } else if (element.shadowRoot) {
-      // shadow host element
-      let shadowHostElement = buildElementObject(frame, element, false);
-      elements.push(shadowHostElement);
-      resultArray.push(shadowHostElement);
-
-      const children = getChildElements(element.shadowRoot);
-      for (let i = 0; i < children.length; i++) {
-        const childElement = children[i];
-        processElement(childElement, shadowHostElement.id);
-      }
-      const selfChildren = getChildElements(element);
-      for (let i = 0; i < selfChildren.length; i++) {
-        const childElement = selfChildren[i];
-        processElement(childElement, shadowHostElement.id);
-      }
-    } else {
-      // For a non-interactable element, if it has direct text, we also tagged
-      // it with unique_id, but with interatable=false in the element.
-      // After that, process its children
-      // and check if any of them are interactable
-      let interactableChildren = [];
-      if (
-        isElementVisible(element) &&
-        !isHidden(element) &&
-        !isScriptOrStyle(element)
+    let children = [];
+    const isVisible = isElementVisible(element);
+    if (isVisible && !isHidden(element) && !isScriptOrStyle(element)) {
+      const interactable = isInteractable(element, hoverStylesMap);
+      let elementObj = null;
+      let isParentSVG = null;
+      if (interactable) {
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (
+        tagName === "frameset" ||
+        tagName === "iframe" ||
+        tagName === "frame"
       ) {
-        let elementObj = null;
-        let isParentSVG = element.closest("svg");
-        if (element.tagName.toLowerCase() === "svg") {
-          // if element is <svg> we save all attributes and its children
-          elementObj = buildElementObject(frame, element, false);
-        } else if (isParentSVG && isParentSVG.getAttribute("unique_id")) {
-          // if elemnet is the children of the <svg> with an unique_id
-          elementObj = buildElementObject(frame, element, false);
-        } else if (isTableRelatedElement(element)) {
-          // build all table related elements into skyvern element
-          // we need these elements to preserve the DOM structure
-          elementObj = buildElementObject(frame, element, false);
-        } else if (hasBeforeOrAfterPseudoContent(element)) {
-          elementObj = buildElementObject(frame, element, false);
-        } else if (full_tree) {
-          // when building full tree, we only get text from element itself
-          // elements without text are purgeable
-          elementObj = buildElementObject(frame, element, false, true);
-          let textContent = "";
-          if (isElementVisible(element)) {
-            for (let i = 0; i < element.childNodes.length; i++) {
-              var node = element.childNodes[i];
-              if (node.nodeType === Node.TEXT_NODE) {
-                textContent += node.data.trim();
-              }
-            }
-          }
-          elementObj.text = textContent;
-          if (textContent.length > 0) {
-            elementObj.purgeable = false;
-          }
-        } else {
-          // character length limit for non-interactable elements should be 5000
-          // we don't use element context in HTML format,
-          // so we need to make sure we parse all text node to avoid missing text in HTML.
-          let textContent = "";
-          for (let i = 0; i < element.childNodes.length; i++) {
-            var node = element.childNodes[i];
-            if (node.nodeType === Node.TEXT_NODE) {
-              textContent += getVisibleText(node).trim();
-            }
-          }
-          if (textContent && textContent.length <= 5000) {
-            elementObj = buildElementObject(frame, element, false);
-          }
-        }
-
-        if (elementObj !== null) {
-          elements.push(elementObj);
-          if (parentId === null) {
-            resultArray.push(elementObj);
-          } else {
-            // TODO: use dict/object so that we access these in O(1) instead
-            elements
-              .find((element) => element.id === parentId)
-              .children.push(elementObj);
-          }
-          parentId = elementObj.id;
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (element.shadowRoot) {
+        elementObj = await buildElementObject(frame, element, interactable);
+        children = getChildElements(element.shadowRoot);
+      } else if (isTableRelatedElement(element)) {
+        // build all table related elements into skyvern element
+        // we need these elements to preserve the DOM structure
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (hasBeforeOrAfterPseudoContent(element)) {
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (tagName === "svg") {
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (
+        (isParentSVG = element.closest("svg")) &&
+        isParentSVG.getAttribute("unique_id")
+      ) {
+        // if elemnet is the children of the <svg> with an unique_id
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (
+        getElementText(element).length > 0 &&
+        getElementText(element).length <= 5000
+      ) {
+        elementObj = await buildElementObject(frame, element, interactable);
+      } else if (full_tree) {
+        // when building full tree, we only get text from element itself
+        // elements without text are purgeable
+        elementObj = await buildElementObject(
+          frame,
+          element,
+          interactable,
+          true,
+        );
+        if (elementObj.text.length > 0) {
+          elementObj.purgeable = false;
         }
       }
 
-      const children = getChildElements(element);
-      for (let i = 0; i < children.length; i++) {
-        const childElement = children[i];
-        processElement(childElement, parentId);
+      if (elementObj) {
+        elements.push(elementObj);
+        // If the element is interactable but has no interactable parent,
+        // then it starts a new tree, so add it to the result array
+        // and set its id as the interactable parent id for the next elements
+        // under it
+        if (parentId === null) {
+          resultArray.push(elementObj);
+        }
+        // If the element is interactable and has an interactable parent,
+        // then add it to the children of the parent
+        else {
+          // TODO: use dict/object so that we access these in O(1) instead
+          elements
+            .find((element) => element.id === parentId)
+            .children.push(elementObj);
+        }
+        parentId = elementObj.id;
       }
     }
+
+    children = children.concat(getChildElements(element));
+    for (let i = 0; i < children.length; i++) {
+      const childElement = children[i];
+      await processElement(childElement, parentId);
+    }
+    return;
   }
 
   const getContextByParent = (element, ctx) => {
@@ -1614,7 +1668,7 @@ function buildElementTree(starter = document.body, frame, full_tree = false) {
   };
 
   // setup before parsing the dom
-  processElement(starter, null);
+  await processElement(starter, null);
 
   for (var element of elements) {
     if (
@@ -1680,8 +1734,11 @@ function drawBoundingBoxes(elements) {
   addHintMarkersToPage(hintMarkers);
 }
 
-function buildElementsAndDrawBoundingBoxes() {
-  var elementsAndResultArray = buildTreeFromBody();
+async function buildElementsAndDrawBoundingBoxes(
+  frame = "main.frame",
+  frame_index = undefined,
+) {
+  var elementsAndResultArray = await buildTreeFromBody(frame, frame_index);
   drawBoundingBoxes(elementsAndResultArray[0]);
 }
 
@@ -1865,11 +1922,15 @@ function removeBoundingBoxes() {
   }
 }
 
-function scrollToTop(draw_boxes) {
+async function scrollToTop(
+  draw_boxes,
+  frame = "main.frame",
+  frame_index = undefined,
+) {
   removeBoundingBoxes();
   window.scroll({ left: 0, top: 0, behavior: "instant" });
   if (draw_boxes) {
-    buildElementsAndDrawBoundingBoxes();
+    await buildElementsAndDrawBoundingBoxes(frame, frame_index);
   }
   return window.scrollY;
 }
@@ -1882,7 +1943,11 @@ function scrollToXY(x, y) {
   window.scroll({ left: x, top: y, behavior: "instant" });
 }
 
-function scrollToNextPage(draw_boxes) {
+async function scrollToNextPage(
+  draw_boxes,
+  frame = "main.frame",
+  frame_index = undefined,
+) {
   // remove bounding boxes, scroll to next page with 200px overlap, then draw bounding boxes again
   // return true if there is a next page, false otherwise
   removeBoundingBoxes();
@@ -1892,7 +1957,7 @@ function scrollToNextPage(draw_boxes) {
     behavior: "instant",
   });
   if (draw_boxes) {
-    buildElementsAndDrawBoundingBoxes();
+    await buildElementsAndDrawBoundingBoxes(frame, frame_index);
   }
   return window.scrollY;
 }
@@ -2002,6 +2067,10 @@ function getHoverStylesMap() {
                   });
                 }
 
+                // only need the style which includes the cursor attribute.
+                if (!("cursor" in styles)) {
+                  continue;
+                }
                 hoverMap.set(baseSelector, styles);
               }
             }
@@ -2060,25 +2129,45 @@ function isClassNameIncludesHidden(className) {
   return className.toLowerCase().includes("hide");
 }
 
-function addIncrementalNodeToMap(parentNode, childrenNode) {
-  // calculate the depth of targetNode element for sorting
-  const depth = getElementDomDepth(parentNode);
-  let newNodesTreeList = [];
-  if (window.globalDomDepthMap.has(depth)) {
-    newNodesTreeList = window.globalDomDepthMap.get(depth);
-  }
+function waitForNextFrame() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
 
-  for (const child of childrenNode) {
-    const [_, newNodeTree] = buildElementTree(child, "", true);
-    if (newNodeTree.length > 0) {
-      newNodesTreeList.push(...newNodeTree);
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function addIncrementalNodeToMap(parentNode, childrenNode) {
+  // make the dom parser async
+  await waitForNextFrame();
+  if (window.globalListnerFlag) {
+    // calculate the depth of targetNode element for sorting
+    const depth = getElementDomDepth(parentNode);
+    let newNodesTreeList = [];
+    if (window.globalDomDepthMap.has(depth)) {
+      newNodesTreeList = window.globalDomDepthMap.get(depth);
     }
+
+    try {
+      for (const child of childrenNode) {
+        // Pass -1 as frame_index to indicate the frame number is not sensitive in this case
+        const [_, newNodeTree] = await buildElementTree(child, "", true);
+        if (newNodeTree.length > 0) {
+          newNodesTreeList.push(...newNodeTree);
+        }
+      }
+    } catch (error) {
+      console.error("Error building incremental element node:", error);
+    }
+    window.globalDomDepthMap.set(depth, newNodesTreeList);
   }
-  window.globalDomDepthMap.set(depth, newNodesTreeList);
+  await window.globalParsedElementCounter.add();
 }
 
 if (window.globalObserverForDOMIncrement === undefined) {
-  window.globalObserverForDOMIncrement = new MutationObserver(function (
+  window.globalObserverForDOMIncrement = new MutationObserver(async function (
     mutationsList,
     observer,
   ) {
@@ -2092,13 +2181,14 @@ if (window.globalObserverForDOMIncrement === undefined) {
               targetNode: node,
               newNodes: [node],
             });
-            addIncrementalNodeToMap(node, [node]);
+            await addIncrementalNodeToMap(node, [node]);
           }
         }
         if (mutation.attributeName === "style") {
           // TODO: need to confirm that elemnent is hidden previously
           const node = mutation.target;
           if (node.nodeType === Node.TEXT_NODE) continue;
+          if (node.tagName.toLowerCase() === "body") continue;
           const newStyle = getElementComputedStyle(node);
           const newDisplay = newStyle?.display;
           if (newDisplay !== "none") {
@@ -2106,7 +2196,7 @@ if (window.globalObserverForDOMIncrement === undefined) {
               targetNode: node,
               newNodes: [node],
             });
-            addIncrementalNodeToMap(node, [node]);
+            await addIncrementalNodeToMap(node, [node]);
           }
         }
         if (mutation.attributeName === "class") {
@@ -2126,14 +2216,16 @@ if (window.globalObserverForDOMIncrement === undefined) {
               targetNode: node,
               newNodes: [node],
             });
-            addIncrementalNodeToMap(node, [node]);
+            await addIncrementalNodeToMap(node, [node]);
           }
         }
       }
 
       if (mutation.type === "childList") {
+        if (mutation.target.nodeType === Node.TEXT_NODE) continue;
+        const node = mutation.target;
         let changedNode = {
-          targetNode: mutation.target, // TODO: for future usage, when we want to parse new elements into a tree
+          targetNode: node, // TODO: for future usage, when we want to parse new elements into a tree
         };
         let newNodes = [];
         if (mutation.addedNodes && mutation.addedNodes.length > 0) {
@@ -2143,10 +2235,23 @@ if (window.globalObserverForDOMIncrement === undefined) {
             newNodes.push(node);
           }
         }
+        if (
+          newNodes.length == 0 &&
+          (node.tagName.toLowerCase() === "ul" ||
+            (node.tagName.toLowerCase() === "div" &&
+              node.hasAttribute("role") &&
+              node.getAttribute("role").toLowerCase() === "listbox"))
+        ) {
+          newNodes.push(node);
+        }
+
         if (newNodes.length > 0) {
           changedNode.newNodes = newNodes;
           window.globalOneTimeIncrementElements.push(changedNode);
-          addIncrementalNodeToMap(changedNode.targetNode, changedNode.newNodes);
+          await addIncrementalNodeToMap(
+            changedNode.targetNode,
+            changedNode.newNodes,
+          );
         }
       }
     }
@@ -2154,8 +2259,10 @@ if (window.globalObserverForDOMIncrement === undefined) {
 }
 
 function startGlobalIncrementalObserver() {
+  window.globalListnerFlag = true;
   window.globalDomDepthMap = new Map();
   window.globalOneTimeIncrementElements = [];
+  window.globalParsedElementCounter = new SafeCounter();
   window.globalObserverForDOMIncrement.takeRecords(); // cleanup the older data
   window.globalObserverForDOMIncrement.observe(document.body, {
     attributes: true,
@@ -2166,14 +2273,28 @@ function startGlobalIncrementalObserver() {
   });
 }
 
-function stopGlobalIncrementalObserver() {
-  window.globalDomDepthMap = new Map();
+async function stopGlobalIncrementalObserver() {
+  window.globalListnerFlag = false;
   window.globalObserverForDOMIncrement.disconnect();
   window.globalObserverForDOMIncrement.takeRecords(); // cleanup the older data
+  while (
+    (await window.globalParsedElementCounter.get()) <
+    window.globalOneTimeIncrementElements.length
+  ) {
+    await sleep(100);
+  }
   window.globalOneTimeIncrementElements = [];
+  window.globalDomDepthMap = new Map();
 }
 
-function getIncrementElements() {
+async function getIncrementElements() {
+  while (
+    (await window.globalParsedElementCounter.get()) <
+    window.globalOneTimeIncrementElements.length
+  ) {
+    await sleep(100);
+  }
+
   // cleanup the chidren tree, remove the duplicated element
   // search starting from the shallowest node:
   // 1. if deeper, the node could only be the children of the shallower one or no related one.
@@ -2187,14 +2308,14 @@ function getIncrementElements() {
     const depth = sortedDepth[idx];
     const treeList = window.globalDomDepthMap.get(depth);
 
-    const removeDupAndConcatChildren = (element) => {
+    const removeDupAndConcatChildren = async (element) => {
       let children = element.children;
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
         const domElement = document.querySelector(`[unique_id="${child.id}"]`);
         // if the element is still on the page, we rebuild the element to update the information
         if (domElement) {
-          let newChild = buildElementObject(
+          let newChild = await buildElementObject(
             "",
             domElement,
             child.interactable,
@@ -2217,7 +2338,7 @@ function getIncrementElements() {
       idToElement.set(element.id, element);
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
-        removeDupAndConcatChildren(child);
+        await removeDupAndConcatChildren(child);
       }
     };
 
@@ -2227,7 +2348,7 @@ function getIncrementElements() {
       );
       // if the element is still on the page, we rebuild the element to update the information
       if (domElement) {
-        let newHead = buildElementObject(
+        let newHead = await buildElementObject(
           "",
           domElement,
           treeHeadElement.interactable,
@@ -2241,7 +2362,7 @@ function getIncrementElements() {
       if (!idToElement.has(treeHeadElement.id)) {
         cleanedTreeList.push(treeHeadElement);
       }
-      removeDupAndConcatChildren(treeHeadElement);
+      await removeDupAndConcatChildren(treeHeadElement);
     }
   }
 

@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import os
 import uuid
 from enum import Enum
 from typing import Annotated, Any
@@ -31,13 +32,14 @@ from skyvern.forge.sdk.api.aws import aws_client
 from skyvern.forge.sdk.api.llm.exceptions import LLMProviderError
 from skyvern.forge.sdk.artifact.models import Artifact
 from skyvern.forge.sdk.core import skyvern_context
+from skyvern.forge.sdk.core.hashing import generate_url_hash
 from skyvern.forge.sdk.core.permissions.permission_checker_factory import PermissionCheckerFactory
 from skyvern.forge.sdk.core.security import generate_skyvern_signature
 from skyvern.forge.sdk.db.enums import OrganizationAuthTokenType
 from skyvern.forge.sdk.executor.factory import AsyncExecutorFactory
 from skyvern.forge.sdk.models import Step
 from skyvern.forge.sdk.schemas.ai_suggestions import AISuggestionBase, AISuggestionRequest
-from skyvern.forge.sdk.schemas.observers import CruiseRequest, ObserverCruise
+from skyvern.forge.sdk.schemas.observers import ObserverTaskRequest
 from skyvern.forge.sdk.schemas.organizations import (
     GetOrganizationAPIKeysResponse,
     GetOrganizationsResponse,
@@ -45,6 +47,7 @@ from skyvern.forge.sdk.schemas.organizations import (
     OrganizationUpdate,
 )
 from skyvern.forge.sdk.schemas.task_generations import GenerateTaskRequest, TaskGeneration, TaskGenerationBase
+from skyvern.forge.sdk.schemas.task_runs import TaskRunType
 from skyvern.forge.sdk.schemas.tasks import (
     CreateTaskResponse,
     OrderBy,
@@ -59,20 +62,25 @@ from skyvern.forge.sdk.services import observer_service, org_auth_service
 from skyvern.forge.sdk.workflow.exceptions import (
     FailedToCreateWorkflow,
     FailedToUpdateWorkflow,
+    InvalidTemplateWorkflowPermanentId,
     WorkflowParameterMissingRequiredValue,
 )
+from skyvern.forge.sdk.workflow.models.block import BlockType
 from skyvern.forge.sdk.workflow.models.workflow import (
     RunWorkflowResponse,
     Workflow,
     WorkflowRequestBody,
     WorkflowRun,
+    WorkflowRunStatus,
     WorkflowRunStatusResponse,
+    WorkflowStatus,
 )
 from skyvern.forge.sdk.workflow.models.yaml import WorkflowCreateYAMLRequest
 from skyvern.webeye.actions.actions import Action
 from skyvern.webeye.schemas import BrowserSessionResponse
 
 base_router = APIRouter()
+v2_router = APIRouter()
 
 LOG = structlog.get_logger()
 
@@ -143,6 +151,15 @@ async def create_agent_task(
     await PermissionCheckerFactory.get_instance().check(current_org)
 
     created_task = await app.agent.create_task(task, current_org.organization_id)
+    url_hash = generate_url_hash(task.url)
+    await app.DATABASE.create_task_run(
+        task_run_type=TaskRunType.task_v1,
+        organization_id=current_org.organization_id,
+        run_id=created_task.task_id,
+        title=task.title,
+        url=task.url,
+        url_hash=url_hash,
+    )
     if x_max_steps_override:
         LOG.info(
             "Overriding max steps per run",
@@ -429,6 +446,24 @@ async def get_agent_tasks(
     return ORJSONResponse([(await app.agent.build_task_response(task=task)).model_dump() for task in tasks])
 
 
+@base_router.get("/runs", response_model=list[WorkflowRun | Task])
+@base_router.get("/runs/", response_model=list[WorkflowRun | Task], include_in_schema=False)
+async def get_runs(
+    current_org: Organization = Depends(org_auth_service.get_current_org),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1),
+    status: Annotated[list[WorkflowRunStatus] | None, Query()] = None,
+) -> Response:
+    analytics.capture("skyvern-oss-agent-runs-get")
+
+    # temporary limit to 100 runs
+    if page > 10:
+        return []
+
+    runs = await app.DATABASE.get_all_runs(current_org.organization_id, page=page, page_size=page_size, status=status)
+    return ORJSONResponse([run.model_dump() for run in runs])
+
+
 @base_router.get("/internal/tasks", tags=["agent"], response_model=list[Task])
 @base_router.get(
     "/internal/tasks/",
@@ -631,12 +666,18 @@ async def execute_workflow(
     workflow_request: WorkflowRequestBody,
     version: int | None = None,
     current_org: Organization = Depends(org_auth_service.get_current_org),
+    template: bool = Query(False),
     x_api_key: Annotated[str | None, Header()] = None,
     x_max_steps_override: Annotated[int | None, Header()] = None,
 ) -> RunWorkflowResponse:
     analytics.capture("skyvern-oss-agent-workflow-execute")
     context = skyvern_context.ensure_context()
     request_id = context.request_id
+
+    if template:
+        if workflow_id not in await app.STORAGE.retrieve_global_workflows():
+            raise InvalidTemplateWorkflowPermanentId(workflow_permanent_id=workflow_id)
+
     workflow_run = await app.WORKFLOW_SERVICE.setup_workflow_run(
         request_id=request_id,
         workflow_request=workflow_request,
@@ -644,6 +685,18 @@ async def execute_workflow(
         organization_id=current_org.organization_id,
         version=version,
         max_steps_override=x_max_steps_override,
+        is_template_workflow=template,
+    )
+    workflow = await app.WORKFLOW_SERVICE.get_workflow_by_permanent_id(
+        workflow_permanent_id=workflow_id,
+        organization_id=current_org.organization_id,
+        version=version,
+    )
+    await app.DATABASE.create_task_run(
+        task_run_type=TaskRunType.workflow_run,
+        organization_id=current_org.organization_id,
+        run_id=workflow_run.workflow_run_id,
+        title=workflow.title,
     )
     if x_max_steps_override:
         LOG.info("Overriding max steps per run", max_steps_override=x_max_steps_override)
@@ -675,6 +728,7 @@ async def execute_workflow(
 async def get_workflow_runs(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1),
+    status: Annotated[list[WorkflowRunStatus] | None, Query()] = None,
     current_org: Organization = Depends(org_auth_service.get_current_org),
 ) -> list[WorkflowRun]:
     analytics.capture("skyvern-oss-agent-workflow-runs-get")
@@ -682,6 +736,7 @@ async def get_workflow_runs(
         organization_id=current_org.organization_id,
         page=page,
         page_size=page_size,
+        status=status,
     )
 
 
@@ -698,6 +753,7 @@ async def get_workflow_runs_for_workflow_permanent_id(
     workflow_permanent_id: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1),
+    status: Annotated[list[WorkflowRunStatus] | None, Query()] = None,
     current_org: Organization = Depends(org_auth_service.get_current_org),
 ) -> list[WorkflowRun]:
     analytics.capture("skyvern-oss-agent-workflow-runs-get")
@@ -706,23 +762,22 @@ async def get_workflow_runs_for_workflow_permanent_id(
         organization_id=current_org.organization_id,
         page=page,
         page_size=page_size,
+        status=status,
     )
 
 
 @base_router.get(
     "/workflows/{workflow_id}/runs/{workflow_run_id}",
-    response_model=WorkflowRunStatusResponse,
 )
 @base_router.get(
     "/workflows/{workflow_id}/runs/{workflow_run_id}/",
-    response_model=WorkflowRunStatusResponse,
     include_in_schema=False,
 )
 async def get_workflow_run(
     workflow_id: str,
     workflow_run_id: str,
     current_org: Organization = Depends(org_auth_service.get_current_org),
-) -> WorkflowRunStatusResponse:
+) -> dict[str, Any]:
     analytics.capture("skyvern-oss-agent-workflow-run-get")
     workflow_run_status_response = await app.WORKFLOW_SERVICE.build_workflow_run_status_response(
         workflow_permanent_id=workflow_id,
@@ -730,13 +785,14 @@ async def get_workflow_run(
         organization_id=current_org.organization_id,
         include_cost=True,
     )
+    return_dict = workflow_run_status_response.model_dump()
     observer_cruise = await app.DATABASE.get_observer_cruise_by_workflow_run_id(
         workflow_run_id=workflow_run_id,
         organization_id=current_org.organization_id,
     )
     if observer_cruise:
-        workflow_run_status_response.observer_cruise = observer_cruise
-    return workflow_run_status_response
+        return_dict["observer_task"] = observer_cruise.model_dump(by_alias=True)
+    return return_dict
 
 
 @base_router.get(
@@ -744,6 +800,7 @@ async def get_workflow_run(
 )
 @base_router.get(
     "/workflows/{workflow_id}/runs/{workflow_run_id}/timeline/",
+    include_in_schema=False,
 )
 async def get_workflow_run_timeline(
     workflow_run_id: str,
@@ -751,24 +808,7 @@ async def get_workflow_run_timeline(
     page_size: int = Query(20, ge=1),
     current_org: Organization = Depends(org_auth_service.get_current_org),
 ) -> list[WorkflowRunTimeline]:
-    # get observer cruise by workflow run id
-    observer_cruise_obj = await app.DATABASE.get_observer_cruise_by_workflow_run_id(
-        workflow_run_id=workflow_run_id,
-        organization_id=current_org.organization_id,
-    )
-    # get all the workflow run blocks
-    workflow_run_block_timeline = await app.WORKFLOW_SERVICE.get_workflow_run_timeline(
-        workflow_run_id=workflow_run_id,
-        organization_id=current_org.organization_id,
-    )
-    if observer_cruise_obj and observer_cruise_obj.observer_cruise_id:
-        observer_thought_timeline = await observer_service.get_observer_thought_timelines(
-            observer_cruise_id=observer_cruise_obj.observer_cruise_id,
-            organization_id=current_org.organization_id,
-        )
-        workflow_run_block_timeline.extend(observer_thought_timeline)
-    workflow_run_block_timeline.sort(key=lambda x: x.created_at, reverse=True)
-    return workflow_run_block_timeline
+    return await _flatten_workflow_run_timeline(current_org.organization_id, workflow_run_id)
 
 
 @base_router.get(
@@ -904,12 +944,27 @@ async def get_workflows(
     page_size: int = Query(10, ge=1),
     only_saved_tasks: bool = Query(False),
     only_workflows: bool = Query(False),
+    title: str = Query(""),
     current_org: Organization = Depends(org_auth_service.get_current_org),
+    template: bool = Query(False),
 ) -> list[Workflow]:
     """
     Get all workflows with the latest version for the organization.
     """
     analytics.capture("skyvern-oss-agent-workflows-get")
+
+    if template:
+        global_workflows_permanent_ids = await app.STORAGE.retrieve_global_workflows()
+        if not global_workflows_permanent_ids:
+            return []
+        workflows = await app.WORKFLOW_SERVICE.get_workflows_by_permanent_ids(
+            workflow_permanent_ids=global_workflows_permanent_ids,
+            page=page,
+            page_size=page_size,
+            title=title,
+            statuses=[WorkflowStatus.published, WorkflowStatus.draft],
+        )
+        return workflows
 
     if only_saved_tasks and only_workflows:
         raise HTTPException(
@@ -923,7 +978,25 @@ async def get_workflows(
         page_size=page_size,
         only_saved_tasks=only_saved_tasks,
         only_workflows=only_workflows,
+        title=title,
+        statuses=[WorkflowStatus.published, WorkflowStatus.draft],
     )
+
+
+@base_router.get("/workflows/templates", response_model=list[Workflow])
+@base_router.get("/workflows/templates/", response_model=list[Workflow], include_in_schema=False)
+async def get_workflow_templates() -> list[Workflow]:
+    global_workflows_permanent_ids = await app.STORAGE.retrieve_global_workflows()
+
+    if not global_workflows_permanent_ids:
+        return []
+
+    workflows = await app.WORKFLOW_SERVICE.get_workflows_by_permanent_ids(
+        workflow_permanent_ids=global_workflows_permanent_ids,
+        statuses=[WorkflowStatus.published, WorkflowStatus.draft],
+    )
+
+    return workflows
 
 
 @base_router.get("/workflows/{workflow_permanent_id}", response_model=Workflow)
@@ -932,11 +1005,16 @@ async def get_workflow(
     workflow_permanent_id: str,
     version: int | None = None,
     current_org: Organization = Depends(org_auth_service.get_current_org),
+    template: bool = Query(False),
 ) -> Workflow:
     analytics.capture("skyvern-oss-agent-workflows-get")
+    if template:
+        if workflow_permanent_id not in await app.STORAGE.retrieve_global_workflows():
+            raise InvalidTemplateWorkflowPermanentId(workflow_permanent_id=workflow_permanent_id)
+
     return await app.WORKFLOW_SERVICE.get_workflow_by_permanent_id(
         workflow_permanent_id=workflow_permanent_id,
-        organization_id=current_org.organization_id,
+        organization_id=None if template else current_org.organization_id,
         version=version,
     )
 
@@ -955,7 +1033,7 @@ async def make_ai_suggestion(
     llm_prompt = ""
 
     if ai_suggestion_type == AISuggestionType.DATA_SCHEMA:
-        llm_prompt = prompt_engine.load_prompt("suggest-data-schema", input=data.input)
+        llm_prompt = prompt_engine.load_prompt("suggest-data-schema", input=data.input, additional_context=data.context)
 
     try:
         new_ai_suggestion = await app.DATABASE.create_ai_suggestion(
@@ -963,7 +1041,9 @@ async def make_ai_suggestion(
             ai_suggestion_type=ai_suggestion_type,
         )
 
-        llm_response = await app.LLM_API_HANDLER(prompt=llm_prompt, ai_suggestion=new_ai_suggestion)
+        llm_response = await app.LLM_API_HANDLER(
+            prompt=llm_prompt, ai_suggestion=new_ai_suggestion, prompt_name="suggest-data-schema"
+        )
         parsed_ai_suggestion = AISuggestionBase.model_validate(llm_response)
 
         return parsed_ai_suggestion
@@ -1007,7 +1087,7 @@ async def generate_task(
 
     llm_prompt = prompt_engine.load_prompt("generate-task", user_prompt=data.prompt)
     try:
-        llm_response = await app.LLM_API_HANDLER(prompt=llm_prompt)
+        llm_response = await app.LLM_API_HANDLER(prompt=llm_prompt, prompt_name="generate-task")
         parsed_task_generation_obj = TaskGenerationBase.model_validate(llm_response)
 
         # generate a TaskGenerationModel
@@ -1080,7 +1160,7 @@ async def validate_file_size(file: UploadFile) -> UploadFile:
     if size > app.SETTINGS_MANAGER.MAX_UPLOAD_FILE_SIZE:
         raise HTTPException(
             status_code=413,
-            detail=f"File size exceeds the maximum allowed size ({app.SETTINGS_MANAGER.MAX_UPLOAD_FILE_SIZE/1024/1024} MB)",
+            detail=f"File size exceeds the maximum allowed size ({app.SETTINGS_MANAGER.MAX_UPLOAD_FILE_SIZE / 1024 / 1024} MB)",
         )
     return file
 
@@ -1093,12 +1173,25 @@ async def upload_file(
 ) -> Response:
     bucket = app.SETTINGS_MANAGER.AWS_S3_BUCKET_UPLOADS
     todays_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    uuid_prefixed_filename = f"{str(uuid.uuid4())}_{file.filename}"
-    s3_uri = (
-        f"s3://{bucket}/{app.SETTINGS_MANAGER.ENV}/{current_org.organization_id}/{todays_date}/{uuid_prefixed_filename}"
-    )
-    # Stream the file to S3
-    uploaded_s3_uri = await aws_client.upload_file_stream(s3_uri, file.file)
+
+    # First try uploading with original filename
+    try:
+        sanitized_filename = os.path.basename(file.filename)  # Remove any path components
+        s3_uri = (
+            f"s3://{bucket}/{app.SETTINGS_MANAGER.ENV}/{current_org.organization_id}/{todays_date}/{sanitized_filename}"
+        )
+        uploaded_s3_uri = await aws_client.upload_file_stream(s3_uri, file.file)
+    except Exception:
+        LOG.error("Failed to upload file to S3", exc_info=True)
+        uploaded_s3_uri = None
+
+    # If upload fails, try again with UUID prefix
+    if not uploaded_s3_uri:
+        uuid_prefixed_filename = f"{str(uuid.uuid4())}_{file.filename}"
+        s3_uri = f"s3://{bucket}/{app.SETTINGS_MANAGER.ENV}/{current_org.organization_id}/{todays_date}/{uuid_prefixed_filename}"
+        file.file.seek(0)  # Reset file pointer
+        uploaded_s3_uri = await aws_client.upload_file_stream(s3_uri, file.file)
+
     if not uploaded_s3_uri:
         raise HTTPException(status_code=500, detail="Failed to upload file to S3.")
 
@@ -1115,51 +1208,57 @@ async def upload_file(
     )
 
 
-@base_router.post("/cruise")
-@base_router.post("/cruise/", include_in_schema=False)
-async def observer_cruise(
+@v2_router.post("/tasks")
+@v2_router.post("/tasks/", include_in_schema=False)
+async def observer_task(
     request: Request,
     background_tasks: BackgroundTasks,
-    data: CruiseRequest,
+    data: ObserverTaskRequest,
     organization: Organization = Depends(org_auth_service.get_current_org),
-    x_max_iterations_override: Annotated[int | None, Header()] = None,
-) -> ObserverCruise:
+    x_max_iterations_override: Annotated[int | str | None, Header()] = None,
+) -> dict[str, Any]:
     if x_max_iterations_override:
         LOG.info("Overriding max iterations for observer", max_iterations_override=x_max_iterations_override)
 
     try:
-        observer_cruise = await observer_service.initialize_observer_cruise(
+        observer_task = await observer_service.initialize_observer_task(
             organization=organization,
             user_prompt=data.user_prompt,
             user_url=str(data.url) if data.url else None,
+            totp_identifier=data.totp_identifier,
+            totp_verification_url=data.totp_verification_url,
+            webhook_callback_url=data.webhook_callback_url,
+            proxy_location=data.proxy_location,
+            publish_workflow=data.publish_workflow,
+            create_task_run=True,
         )
     except LLMProviderError:
         LOG.error("LLM failure to initialize observer cruise", exc_info=True)
         raise HTTPException(
             status_code=500, detail="Skyvern LLM failure to initialize observer cruise. Please try again later."
         )
-    analytics.capture("skyvern-oss-agent-observer-cruise", data={"url": observer_cruise.url})
+    analytics.capture("skyvern-oss-agent-observer-cruise", data={"url": observer_task.url})
     await AsyncExecutorFactory.get_executor().execute_cruise(
         request=request,
         background_tasks=background_tasks,
         organization_id=organization.organization_id,
-        observer_cruise_id=observer_cruise.observer_cruise_id,
+        observer_cruise_id=observer_task.observer_cruise_id,
         max_iterations_override=x_max_iterations_override,
         browser_session_id=data.browser_session_id,
     )
-    return observer_cruise
+    return observer_task.model_dump(by_alias=True)
 
 
-@base_router.get("/cruise/{observer_cruise_id}")
-@base_router.get("/cruise/{observer_cruise_id}/", include_in_schema=False)
-async def get_observer_cruise(
-    observer_cruise_id: str,
+@v2_router.get("/tasks/{task_id}")
+@v2_router.get("/tasks/{task_id}/", include_in_schema=False)
+async def get_observer_task(
+    task_id: str,
     organization: Organization = Depends(org_auth_service.get_current_org),
-) -> ObserverCruise:
-    observer_cruise = await observer_service.get_observer_cruise(observer_cruise_id, organization.organization_id)
-    if not observer_cruise:
-        raise HTTPException(status_code=404, detail=f"Observer cruise {observer_cruise_id} not found")
-    return observer_cruise
+) -> dict[str, Any]:
+    observer_task = await observer_service.get_observer_cruise(task_id, organization.organization_id)
+    if not observer_task:
+        raise HTTPException(status_code=404, detail=f"Observer task {task_id} not found")
+    return observer_task.model_dump(by_alias=True)
 
 
 @base_router.get(
@@ -1254,3 +1353,52 @@ async def close_browser_session(
         status_code=200,
         media_type="application/json",
     )
+
+
+async def _flatten_workflow_run_timeline(organization_id: str, workflow_run_id: str) -> list[WorkflowRunTimeline]:
+    """
+    Get the timeline workflow runs including the nested workflow runs in a flattened list
+    """
+
+    # get observer task by workflow run id
+    observer_task_obj = await app.DATABASE.get_observer_cruise_by_workflow_run_id(
+        workflow_run_id=workflow_run_id,
+        organization_id=organization_id,
+    )
+    # get all the workflow run blocks
+    workflow_run_block_timeline = await app.WORKFLOW_SERVICE.get_workflow_run_timeline(
+        workflow_run_id=workflow_run_id,
+        organization_id=organization_id,
+    )
+    # loop through the run block timeline, find the task_v2 blocks, flatten the timeline for task_v2
+    final_workflow_run_block_timeline = []
+    for timeline in workflow_run_block_timeline:
+        if not timeline.block:
+            continue
+        if timeline.block.block_type != BlockType.TaskV2:
+            # flatten the timeline for task_v2
+            final_workflow_run_block_timeline.append(timeline)
+            continue
+        if not timeline.block.block_workflow_run_id:
+            LOG.error(
+                "Block workflow run id is not set for task_v2 block",
+                workflow_run_id=workflow_run_id,
+                organization_id=organization_id,
+                observer_cruise_id=observer_task_obj.observer_cruise_id if observer_task_obj else None,
+            )
+            continue
+        # in the future if we want to nested taskv2 shows up as a nested block, we should not flatten the timeline
+        workflow_blocks = await _flatten_workflow_run_timeline(
+            organization_id=organization_id,
+            workflow_run_id=timeline.block.block_workflow_run_id,
+        )
+        final_workflow_run_block_timeline.extend(workflow_blocks)
+
+    if observer_task_obj and observer_task_obj.observer_cruise_id:
+        observer_thought_timeline = await observer_service.get_observer_thought_timelines(
+            observer_cruise_id=observer_task_obj.observer_cruise_id,
+            organization_id=organization_id,
+        )
+        final_workflow_run_block_timeline.extend(observer_thought_timeline)
+    final_workflow_run_block_timeline.sort(key=lambda x: x.created_at, reverse=True)
+    return final_workflow_run_block_timeline

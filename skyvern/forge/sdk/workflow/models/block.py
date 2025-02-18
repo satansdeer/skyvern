@@ -21,6 +21,8 @@ import structlog
 from email_validator import EmailNotValidError, validate_email
 from jinja2 import Template
 from pydantic import BaseModel, Field
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 from skyvern.config import settings
 from skyvern.exceptions import (
@@ -46,6 +48,7 @@ from skyvern.forge.sdk.api.llm.api_handler_factory import LLMAPIHandlerFactory
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core.validators import prepend_scheme_and_validate_url
 from skyvern.forge.sdk.db.enums import TaskType
+from skyvern.forge.sdk.schemas.observers import ObserverTaskStatus
 from skyvern.forge.sdk.schemas.tasks import Task, TaskOutput, TaskStatus
 from skyvern.forge.sdk.workflow.context_manager import BlockMetadata, WorkflowRunContext
 from skyvern.forge.sdk.workflow.exceptions import (
@@ -69,6 +72,7 @@ LOG = structlog.get_logger()
 
 class BlockType(StrEnum):
     TASK = "task"
+    TaskV2 = "task_v2"
     FOR_LOOP = "for_loop"
     CODE = "code"
     TEXT_PROMPT = "text_prompt"
@@ -84,6 +88,7 @@ class BlockType(StrEnum):
     WAIT = "wait"
     FILE_DOWNLOAD = "file_download"
     GOTO_URL = "goto_url"
+    PDF_PARSER = "pdf_parser"
 
 
 class BlockStatus(StrEnum):
@@ -92,6 +97,7 @@ class BlockStatus(StrEnum):
     failed = "failed"
     terminated = "terminated"
     canceled = "canceled"
+    timed_out = "timed_out"
 
 
 @dataclass(frozen=True)
@@ -240,7 +246,9 @@ class Block(BaseModel, abc.ABC):
                     "generate_workflow_run_block_description",
                     block=block_data,
                 )
-                json_response = await app.SECONDARY_LLM_API_HANDLER(prompt=description_generation_prompt)
+                json_response = await app.SECONDARY_LLM_API_HANDLER(
+                    prompt=description_generation_prompt, prompt_name="generate-workflow-run-block-description"
+                )
                 description = json_response.get("summary")
                 LOG.info(
                     "Generated description for the workflow run block",
@@ -437,9 +445,8 @@ class BaseTaskBlock(Block):
             workflow_run_id=workflow_run_id,
             organization_id=organization_id,
         )
-        workflow = await app.WORKFLOW_SERVICE.get_workflow(
-            workflow_id=workflow_run.workflow_id,
-            organization_id=organization_id,
+        workflow = await app.WORKFLOW_SERVICE.get_workflow_by_permanent_id(
+            workflow_permanent_id=workflow_run.workflow_permanent_id,
         )
         # if the task url is parameterized, we need to get the value from the workflow run context
         if self.url and workflow_run_context.has_parameter(self.url) and workflow_run_context.has_value(self.url):
@@ -508,12 +515,12 @@ class BaseTaskBlock(Block):
             workflow_run_block = await app.DATABASE.update_workflow_run_block(
                 workflow_run_block_id=workflow_run_block_id,
                 task_id=task.task_id,
-                organization_id=workflow.organization_id,
+                organization_id=organization_id,
             )
             current_running_task = task
-            organization = await app.DATABASE.get_organization(organization_id=workflow.organization_id)
+            organization = await app.DATABASE.get_organization(organization_id=workflow_run.organization_id)
             if not organization:
-                raise Exception(f"Organization is missing organization_id={workflow.organization_id}")
+                raise Exception(f"Organization is missing organization_id={workflow_run.organization_id}")
 
             browser_state: BrowserState | None = None
             if is_first_task:
@@ -540,7 +547,7 @@ class BaseTaskBlock(Block):
                     await app.DATABASE.update_task(
                         task.task_id,
                         status=TaskStatus.failed,
-                        organization_id=workflow.organization_id,
+                        organization_id=workflow_run.organization_id,
                         failure_reason=str(e),
                     )
                     raise e
@@ -565,7 +572,7 @@ class BaseTaskBlock(Block):
                         workflow_run_id=workflow_run_id,
                         task_id=task.task_id,
                         workflow_id=workflow.workflow_id,
-                        organization_id=workflow.organization_id,
+                        organization_id=workflow_run.organization_id,
                         step_id=step.step_id,
                     )
                     try:
@@ -574,7 +581,7 @@ class BaseTaskBlock(Block):
                         await app.DATABASE.update_task(
                             task.task_id,
                             status=TaskStatus.failed,
-                            organization_id=workflow.organization_id,
+                            organization_id=workflow_run.organization_id,
                             failure_reason=str(e),
                         )
                         raise e
@@ -593,13 +600,15 @@ class BaseTaskBlock(Block):
                 await app.DATABASE.update_task(
                     task.task_id,
                     status=TaskStatus.failed,
-                    organization_id=workflow.organization_id,
+                    organization_id=workflow_run.organization_id,
                     failure_reason=str(e),
                 )
                 raise e
 
             # Check task status
-            updated_task = await app.DATABASE.get_task(task_id=task.task_id, organization_id=workflow.organization_id)
+            updated_task = await app.DATABASE.get_task(
+                task_id=task.task_id, organization_id=workflow_run.organization_id
+            )
             if not updated_task:
                 raise TaskNotFound(task.task_id)
             if not updated_task.status.is_final():
@@ -611,6 +620,7 @@ class BaseTaskBlock(Block):
                 TaskStatus.terminated: BlockStatus.terminated,
                 TaskStatus.failed: BlockStatus.failed,
                 TaskStatus.canceled: BlockStatus.canceled,
+                TaskStatus.timed_out: BlockStatus.timed_out,
             }
             if updated_task.status == TaskStatus.completed or updated_task.status == TaskStatus.terminated:
                 LOG.info(
@@ -619,7 +629,7 @@ class BaseTaskBlock(Block):
                     task_status=updated_task.status,
                     workflow_run_id=workflow_run_id,
                     workflow_id=workflow.workflow_id,
-                    organization_id=workflow.organization_id,
+                    organization_id=workflow_run.organization_id,
                 )
                 success = updated_task.status == TaskStatus.completed
                 task_output = TaskOutput.from_task(updated_task)
@@ -640,7 +650,24 @@ class BaseTaskBlock(Block):
                     task_status=updated_task.status,
                     workflow_run_id=workflow_run_id,
                     workflow_id=workflow.workflow_id,
-                    organization_id=workflow.organization_id,
+                    organization_id=workflow_run.organization_id,
+                )
+                return await self.build_block_result(
+                    success=False,
+                    failure_reason=updated_task.failure_reason,
+                    output_parameter_value=None,
+                    status=block_status_mapping[updated_task.status],
+                    workflow_run_block_id=workflow_run_block_id,
+                    organization_id=organization_id,
+                )
+            elif updated_task.status == TaskStatus.timed_out:
+                LOG.info(
+                    "Task timed out, making the block time out",
+                    task_id=updated_task.task_id,
+                    task_status=updated_task.status,
+                    workflow_run_id=workflow_run_id,
+                    workflow_id=workflow.workflow_id,
+                    organization_id=workflow_run.organization_id,
                 )
                 return await self.build_block_result(
                     success=False,
@@ -658,10 +685,10 @@ class BaseTaskBlock(Block):
                 LOG.warning(
                     f"Task failed with status {updated_task.status}{retry_message}",
                     task_id=updated_task.task_id,
-                    status=updated_task.status,
+                    task_status=updated_task.status,
                     workflow_run_id=workflow_run_id,
                     workflow_id=workflow.workflow_id,
-                    organization_id=workflow.organization_id,
+                    organization_id=workflow_run.organization_id,
                     current_retry=current_retry,
                     max_retries=self.max_retries,
                     task_output=task_output.model_dump_json(),
@@ -740,6 +767,7 @@ class ForLoopBlock(Block):
     loop_blocks: list[BlockTypeVar]
     loop_over: PARAMETER_TYPE | None = None
     loop_variable_reference: str | None = None
+    complete_if_empty: bool = False
 
     def get_all_parameters(
         self,
@@ -789,7 +817,7 @@ class ForLoopBlock(Block):
     def get_loop_over_parameter_values(self, workflow_run_context: WorkflowRunContext) -> list[Any]:
         # parse the value from self.loop_variable_reference and then from self.loop_over
         if self.loop_variable_reference:
-            value_template = f'{{{{ {self.loop_variable_reference.strip(" {}")} | tojson }}}}'
+            value_template = f"{{{{ {self.loop_variable_reference.strip(' {}')} | tojson }}}}"
             try:
                 value_json = self.format_block_parameter_template_from_workflow_run_context(
                     value_template, workflow_run_context
@@ -824,7 +852,10 @@ class ForLoopBlock(Block):
                 raise NotImplementedError()
 
         else:
-            raise NoIterableValueFound()
+            if self.complete_if_empty:
+                return []
+            else:
+                raise NoIterableValueFound()
 
         if isinstance(parameter_value, list):
             return parameter_value
@@ -974,15 +1005,26 @@ class ForLoopBlock(Block):
                 block_type=self.block_type,
                 workflow_run_id=workflow_run_id,
                 num_loop_over_values=len(loop_over_values),
+                complete_if_empty=self.complete_if_empty,
             )
             await self.record_output_parameter_value(workflow_run_context, workflow_run_id, [])
-            return await self.build_block_result(
-                success=False,
-                failure_reason="No iterable value found for the loop block",
-                status=BlockStatus.terminated,
-                workflow_run_block_id=workflow_run_block_id,
-                organization_id=organization_id,
-            )
+            if self.complete_if_empty:
+                return await self.build_block_result(
+                    success=True,
+                    failure_reason=None,
+                    output_parameter_value=[],
+                    status=BlockStatus.completed,
+                    workflow_run_block_id=workflow_run_block_id,
+                    organization_id=organization_id,
+                )
+            else:
+                return await self.build_block_result(
+                    success=False,
+                    failure_reason="No iterable value found for the loop block",
+                    status=BlockStatus.terminated,
+                    workflow_run_block_id=workflow_run_block_id,
+                    organization_id=organization_id,
+                )
 
         if not self.loop_blocks or len(self.loop_blocks) == 0:
             LOG.info(
@@ -1169,7 +1211,7 @@ class TextPromptBlock(Block):
             prompt=prompt,
             llm_key=self.llm_key,
         )
-        response = await llm_api_handler(prompt=prompt)
+        response = await llm_api_handler(prompt=prompt, prompt_name="text-prompt")
         LOG.info("TextPromptBlock: Received response from LLM", response=response)
         return response
 
@@ -1181,6 +1223,13 @@ class TextPromptBlock(Block):
         browser_session_id: str | None = None,
         **kwargs: dict,
     ) -> BlockResult:
+        # Validate block execution
+        await app.AGENT_FUNCTION.validate_block_execution(
+            block=self,
+            workflow_run_block_id=workflow_run_block_id,
+            workflow_run_id=workflow_run_id,
+            organization_id=organization_id,
+        )
         # get workflow run context
         workflow_run_context = self.get_workflow_run_context(workflow_run_id)
         await app.DATABASE.update_workflow_run_block(
@@ -1825,6 +1874,112 @@ class FileParserBlock(Block):
         )
 
 
+class PDFParserBlock(Block):
+    block_type: Literal[BlockType.PDF_PARSER] = BlockType.PDF_PARSER
+
+    file_url: str
+    json_schema: dict[str, Any] | None = None
+
+    def get_all_parameters(
+        self,
+        workflow_run_id: str,
+    ) -> list[PARAMETER_TYPE]:
+        workflow_run_context = self.get_workflow_run_context(workflow_run_id)
+        if self.file_url and workflow_run_context.has_parameter(self.file_url):
+            return [workflow_run_context.get_parameter(self.file_url)]
+        return []
+
+    def format_potential_template_parameters(self, workflow_run_context: WorkflowRunContext) -> None:
+        self.file_url = self.format_block_parameter_template_from_workflow_run_context(
+            self.file_url, workflow_run_context
+        )
+
+    async def execute(
+        self,
+        workflow_run_id: str,
+        workflow_run_block_id: str,
+        organization_id: str | None = None,
+        browser_session_id: str | None = None,
+        **kwargs: dict,
+    ) -> BlockResult:
+        workflow_run_context = self.get_workflow_run_context(workflow_run_id)
+        if (
+            self.file_url
+            and workflow_run_context.has_parameter(self.file_url)
+            and workflow_run_context.has_value(self.file_url)
+        ):
+            file_url_parameter_value = workflow_run_context.get_value(self.file_url)
+            if file_url_parameter_value:
+                LOG.info(
+                    "PDFParserBlock: File URL is parameterized, using parameter value",
+                    file_url_parameter_value=file_url_parameter_value,
+                    file_url_parameter_key=self.file_url,
+                )
+                self.file_url = file_url_parameter_value
+
+        try:
+            self.format_potential_template_parameters(workflow_run_context)
+        except Exception as e:
+            return await self.build_block_result(
+                success=False,
+                failure_reason=f"Failed to format jinja template: {str(e)}",
+                output_parameter_value=None,
+                status=BlockStatus.failed,
+                workflow_run_block_id=workflow_run_block_id,
+                organization_id=organization_id,
+            )
+
+        # Download the file
+        file_path = None
+        if self.file_url.startswith("s3://"):
+            file_path = await download_from_s3(self.get_async_aws_client(), self.file_url)
+        else:
+            file_path = await download_file(self.file_url)
+
+        extracted_text = ""
+        try:
+            reader = PdfReader(file_path)
+            page_count = len(reader.pages)
+            for i in range(page_count):
+                extracted_text += reader.pages[i].extract_text() + "\n"
+
+        except PdfReadError:
+            return await self.build_block_result(
+                success=False,
+                failure_reason="Failed to parse PDF file",
+                output_parameter_value=None,
+                status=BlockStatus.failed,
+                workflow_run_block_id=workflow_run_block_id,
+                organization_id=organization_id,
+            )
+
+        if not self.json_schema:
+            self.json_schema = {
+                "type": "object",
+                "properties": {
+                    "output": {
+                        "type": "object",
+                        "description": "Information extracted from the text",
+                    }
+                },
+            }
+
+        llm_prompt = prompt_engine.load_prompt(
+            "extract-information-from-file-text", extracted_text_content=extracted_text, json_schema=self.json_schema
+        )
+        llm_response = await app.LLM_API_HANDLER(prompt=llm_prompt, prompt_name="extract-information-from-file-text")
+        # Record the parsed data
+        await self.record_output_parameter_value(workflow_run_context, workflow_run_id, llm_response)
+        return await self.build_block_result(
+            success=True,
+            failure_reason=None,
+            output_parameter_value=llm_response,
+            status=BlockStatus.completed,
+            workflow_run_block_id=workflow_run_block_id,
+            organization_id=organization_id,
+        )
+
+
 class WaitBlock(Block):
     block_type: Literal[BlockType.WAIT] = BlockType.WAIT
 
@@ -1936,6 +2091,83 @@ class UrlBlock(BaseTaskBlock):
     url: str
 
 
+# observer block
+class TaskV2Block(Block):
+    block_type: Literal[BlockType.TaskV2] = BlockType.TaskV2
+    prompt: str
+    url: str | None = None
+    totp_verification_url: str | None = None
+    totp_identifier: str | None = None
+    max_iterations: int = 10
+
+    def get_all_parameters(
+        self,
+        workflow_run_id: str,
+    ) -> list[PARAMETER_TYPE]:
+        return []
+
+    async def execute(
+        self,
+        workflow_run_id: str,
+        workflow_run_block_id: str,
+        organization_id: str | None = None,
+        browser_session_id: str | None = None,
+        **kwargs: dict,
+    ) -> BlockResult:
+        from skyvern.forge.sdk.services import observer_service
+        from skyvern.forge.sdk.workflow.models.workflow import WorkflowRunStatus
+
+        if not organization_id:
+            raise ValueError("Running TaskV2Block requires organization_id")
+
+        organization = await app.DATABASE.get_organization(organization_id)
+        if not organization:
+            raise ValueError(f"Organization not found {organization_id}")
+        workflow_run = await app.DATABASE.get_workflow_run(workflow_run_id, organization_id)
+        if not workflow_run:
+            raise ValueError(f"WorkflowRun not found {workflow_run_id} when running TaskV2Block")
+        observer_task = await observer_service.initialize_observer_task(
+            organization,
+            user_prompt=self.prompt,
+            user_url=self.url,
+            parent_workflow_run_id=workflow_run_id,
+            proxy_location=workflow_run.proxy_location,
+        )
+        await app.DATABASE.update_observer_cruise(
+            observer_task.observer_cruise_id, status=ObserverTaskStatus.queued, organization_id=organization_id
+        )
+        if observer_task.workflow_run_id:
+            await app.DATABASE.update_workflow_run(
+                workflow_run_id=observer_task.workflow_run_id,
+                status=WorkflowRunStatus.queued,
+            )
+            await app.DATABASE.update_workflow_run_block(
+                workflow_run_block_id=workflow_run_block_id,
+                organization_id=organization_id,
+                block_workflow_run_id=observer_task.workflow_run_id,
+            )
+
+        observer_task = await observer_service.run_observer_task(
+            organization=organization,
+            observer_cruise_id=observer_task.observer_cruise_id,
+            request_id=None,
+            max_iterations_override=self.max_iterations,
+            browser_session_id=browser_session_id,
+        )
+        result_dict = None
+        if observer_task:
+            result_dict = observer_task.output
+
+        return await self.build_block_result(
+            success=True,
+            failure_reason=None,
+            output_parameter_value=result_dict,
+            status=BlockStatus.completed,
+            workflow_run_block_id=workflow_run_block_id,
+            organization_id=organization_id,
+        )
+
+
 BlockSubclasses = Union[
     ForLoopBlock,
     TaskBlock,
@@ -1945,6 +2177,7 @@ BlockSubclasses = Union[
     UploadToS3Block,
     SendEmailBlock,
     FileParserBlock,
+    PDFParserBlock,
     ValidationBlock,
     ActionBlock,
     NavigationBlock,
@@ -1953,5 +2186,6 @@ BlockSubclasses = Union[
     WaitBlock,
     FileDownloadBlock,
     UrlBlock,
+    TaskV2Block,
 ]
 BlockTypeVar = Annotated[BlockSubclasses, Field(discriminator="block_type")]

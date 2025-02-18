@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from skyvern.forge.sdk.artifact.models import Artifact, ArtifactType, LogEntityType
 from skyvern.forge.sdk.models import Step
 from skyvern.forge.sdk.schemas.ai_suggestions import AISuggestion
-from skyvern.forge.sdk.schemas.observers import ObserverCruise, ObserverThought
+from skyvern.forge.sdk.schemas.observers import ObserverTask, ObserverThought
 from skyvern.forge.sdk.schemas.workflow_runs import WorkflowRunBlock
 
 # TODO: This should be a part of the ArtifactType model
@@ -41,6 +41,10 @@ class BaseStorage(ABC):
         pass
 
     @abstractmethod
+    async def retrieve_global_workflows(self) -> list[str]:
+        pass
+
+    @abstractmethod
     def build_log_uri(self, log_entity_type: LogEntityType, log_entity_id: str, artifact_type: ArtifactType) -> str:
         pass
 
@@ -52,7 +56,7 @@ class BaseStorage(ABC):
 
     @abstractmethod
     def build_observer_cruise_uri(
-        self, artifact_id: str, observer_cruise: ObserverCruise, artifact_type: ArtifactType
+        self, artifact_id: str, observer_cruise: ObserverTask, artifact_type: ArtifactType
     ) -> str:
         pass
 

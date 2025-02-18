@@ -6,6 +6,8 @@ import {
   CursorTextIcon,
   DownloadIcon,
   EnvelopeClosedIcon,
+  ExternalLinkIcon,
+  FileTextIcon,
   ListBulletIcon,
   LockOpen1Icon,
   StopwatchIcon,
@@ -52,7 +54,8 @@ function WorkflowBlockIcon({ workflowBlockType, className }: Props) {
     case "send_email": {
       return <EnvelopeClosedIcon className={className} />;
     }
-    case "task": {
+    case "task":
+    case "task_v2": {
       return <ListBulletIcon className={className} />;
     }
     case "text_prompt": {
@@ -66,6 +69,12 @@ function WorkflowBlockIcon({ workflowBlockType, className }: Props) {
     }
     case "wait": {
       return <StopwatchIcon className={className} />;
+    }
+    case "pdf_parser": {
+      return <FileTextIcon className={className} />;
+    }
+    case "goto_url": {
+      return <ExternalLinkIcon className={className} />;
     }
   }
 }

@@ -2,14 +2,16 @@ import Dagre from "@dagrejs/dagre";
 import type { Node } from "@xyflow/react";
 import { Edge } from "@xyflow/react";
 import { nanoid } from "nanoid";
-import type {
-  AWSSecretParameter,
-  OutputParameter,
-  Parameter,
-  WorkflowApiResponse,
-  WorkflowBlock,
-  WorkflowParameterValueType,
-  WorkflowSettings,
+import {
+  WorkflowBlockTypes,
+  WorkflowParameterTypes,
+  type AWSSecretParameter,
+  type OutputParameter,
+  type Parameter,
+  type WorkflowApiResponse,
+  type WorkflowBlock,
+  type WorkflowParameterValueType,
+  type WorkflowSettings,
 } from "../types/workflowTypes";
 import {
   ActionBlockYAML,
@@ -30,6 +32,9 @@ import {
   LoginBlockYAML,
   WaitBlockYAML,
   FileDownloadBlockYAML,
+  PDFParserBlockYAML,
+  Taskv2BlockYAML,
+  URLBlockYAML,
 } from "../types/workflowYamlTypes";
 import {
   EMAIL_BLOCK_SENDER,
@@ -62,7 +67,10 @@ import {
   StartNodeData,
 } from "./nodes/StartNode/types";
 import { isTaskNode, taskNodeDefaultData } from "./nodes/TaskNode/types";
-import { textPromptNodeDefaultData } from "./nodes/TextPromptNode/types";
+import {
+  isTextPromptNode,
+  textPromptNodeDefaultData,
+} from "./nodes/TextPromptNode/types";
 import { NodeBaseData } from "./nodes/types";
 import { uploadNodeDefaultData } from "./nodes/UploadNode/types";
 import {
@@ -79,9 +87,15 @@ import {
   isExtractionNode,
 } from "./nodes/ExtractionNode/types";
 import { loginNodeDefaultData } from "./nodes/LoginNode/types";
-import { waitNodeDefaultData } from "./nodes/WaitNode/types";
+import { isWaitNode, waitNodeDefaultData } from "./nodes/WaitNode/types";
 import { fileDownloadNodeDefaultData } from "./nodes/FileDownloadNode/types";
 import { ProxyLocation } from "@/api/types";
+import {
+  isPdfParserNode,
+  pdfParserNodeDefaultData,
+} from "./nodes/PDFParserNode/types";
+import { taskv2NodeDefaultData } from "./nodes/Taskv2Node/types";
+import { urlNodeDefaultData } from "./nodes/URLNode/types";
 
 export const NEW_NODE_LABEL_PREFIX = "block_";
 
@@ -140,7 +154,7 @@ function layout(
     const loopNodeWidth = 600; // 600 px
     const layouted = layoutUtil(childNodes, childEdges, {
       marginx: (loopNodeWidth - maxChildWidth) / 2,
-      marginy: 200,
+      marginy: 225,
     });
     loopNodeChildren[index] = layouted.nodes;
   });
@@ -158,6 +172,7 @@ function layout(
 function convertToNode(
   identifiers: { id: string; parentId?: string },
   block: WorkflowBlock,
+  editable: boolean,
 ): AppNode {
   const common = {
     draggable: false,
@@ -167,7 +182,7 @@ function convertToNode(
   const commonData: NodeBaseData = {
     label: block.label,
     continueOnFailure: block.continue_on_failure,
-    editable: true,
+    editable,
   };
   switch (block.block_type) {
     case "task": {
@@ -192,6 +207,21 @@ function convertToNode(
           cacheActions: block.cache_actions,
           completeCriterion: block.complete_criterion ?? "",
           terminateCriterion: block.terminate_criterion ?? "",
+        },
+      };
+    }
+    case "task_v2": {
+      return {
+        ...identifiers,
+        ...common,
+        type: "taskv2",
+        data: {
+          ...commonData,
+          prompt: block.prompt,
+          url: block.url ?? "",
+          maxIterations: block.max_iterations,
+          totpIdentifier: block.totp_identifier,
+          totpVerificationUrl: block.totp_verification_url,
         },
       };
     }
@@ -297,7 +327,7 @@ function convertToNode(
         type: "wait",
         data: {
           ...commonData,
-          waitInSeconds: block.wait_sec ?? 1,
+          waitInSeconds: String(block.wait_sec ?? 1),
         },
       };
     }
@@ -377,6 +407,7 @@ function convertToNode(
           ...commonData,
           loopValue: block.loop_over?.key ?? "",
           loopVariableReference: loopVariableReference,
+          completeIfEmpty: block.complete_if_empty,
         },
       };
     }
@@ -388,6 +419,19 @@ function convertToNode(
         data: {
           ...commonData,
           fileUrl: block.file_url,
+        },
+      };
+    }
+
+    case "pdf_parser": {
+      return {
+        ...identifiers,
+        ...common,
+        type: "pdfParser",
+        data: {
+          ...commonData,
+          fileUrl: block.file_url,
+          jsonSchema: JSON.stringify(block.json_schema, null, 2),
         },
       };
     }
@@ -412,6 +456,18 @@ function convertToNode(
         data: {
           ...commonData,
           path: block.path,
+        },
+      };
+    }
+
+    case "goto_url": {
+      return {
+        ...identifiers,
+        ...common,
+        type: "url",
+        data: {
+          ...commonData,
+          url: block.url,
         },
       };
     }
@@ -535,6 +591,7 @@ export function nodeAdderNode(id: string, parentId?: string): NodeAdderNode {
 function getElements(
   blocks: Array<WorkflowBlock>,
   settings: WorkflowSettings,
+  editable: boolean,
 ): {
   nodes: Array<AppNode>;
   edges: Array<Edge>;
@@ -550,6 +607,7 @@ function getElements(
       persistBrowserSession: settings.persistBrowserSession,
       proxyLocation: settings.proxyLocation ?? ProxyLocation.Residential,
       webhookCallbackUrl: settings.webhookCallbackUrl ?? "",
+      editable,
     }),
   );
 
@@ -560,6 +618,7 @@ function getElements(
         parentId: d.parentId ?? undefined,
       },
       d.block,
+      editable,
     );
     nodes.push(node);
     if (d.previous) {
@@ -578,6 +637,7 @@ function getElements(
         startNodeId,
         {
           withWorkflowSettings: false,
+          editable,
         },
         block.id,
       ),
@@ -628,6 +688,17 @@ function createNode(
         type: "task",
         data: {
           ...taskNodeDefaultData,
+          label,
+        },
+      };
+    }
+    case "taskv2": {
+      return {
+        ...identifiers,
+        ...common,
+        type: "taskv2",
+        data: {
+          ...taskv2NodeDefaultData,
           label,
         },
       };
@@ -786,6 +857,28 @@ function createNode(
         },
       };
     }
+    case "pdfParser": {
+      return {
+        ...identifiers,
+        ...common,
+        type: "pdfParser",
+        data: {
+          ...pdfParserNodeDefaultData,
+          label,
+        },
+      };
+    }
+    case "url": {
+      return {
+        ...identifiers,
+        ...common,
+        type: "url",
+        data: {
+          ...urlNodeDefaultData,
+          label,
+        },
+      };
+    }
   }
 }
 
@@ -828,6 +921,17 @@ function getWorkflowBlock(node: WorkflowBlockNode): BlockYAML {
         totp_identifier: node.data.totpIdentifier,
         totp_verification_url: node.data.totpVerificationUrl,
         cache_actions: node.data.cacheActions,
+      };
+    }
+    case "taskv2": {
+      return {
+        ...base,
+        block_type: "task_v2",
+        prompt: node.data.prompt,
+        max_iterations: node.data.maxIterations,
+        totp_identifier: node.data.totpIdentifier,
+        totp_verification_url: node.data.totpVerificationUrl,
+        url: node.data.url,
       };
     }
     case "validation": {
@@ -933,7 +1037,7 @@ function getWorkflowBlock(node: WorkflowBlockNode): BlockYAML {
       return {
         ...base,
         block_type: "wait",
-        wait_sec: node.data.waitInSeconds,
+        wait_sec: Number(node.data.waitInSeconds),
       };
     }
     case "fileDownload": {
@@ -1018,6 +1122,21 @@ function getWorkflowBlock(node: WorkflowBlockNode): BlockYAML {
         parameter_keys: node.data.parameterKeys,
       };
     }
+    case "pdfParser": {
+      return {
+        ...base,
+        block_type: "pdf_parser",
+        file_url: node.data.fileUrl,
+        json_schema: JSONParseSafe(node.data.jsonSchema),
+      };
+    }
+    case "url": {
+      return {
+        ...base,
+        block_type: "goto_url",
+        url: node.data.url,
+      };
+    }
     default: {
       throw new Error("Invalid node type for getWorkflowBlock");
     }
@@ -1074,9 +1193,9 @@ function getWorkflowBlocksUtil(
           block_type: "for_loop",
           label: node.data.label,
           continue_on_failure: node.data.continueOnFailure,
-          loop_over_parameter_key: node.data.loopValue,
           loop_blocks: getOrderedChildrenBlocks(nodes, edges, node.id),
           loop_variable_reference: node.data.loopVariableReference,
+          complete_if_empty: node.data.completeIfEmpty,
         },
       ];
     }
@@ -1241,22 +1360,22 @@ const sendEmailExpectedParameters = [
   {
     key: SMTP_HOST_PARAMETER_KEY,
     aws_key: SMTP_HOST_AWS_KEY,
-    parameter_type: "aws_secret",
+    parameter_type: WorkflowParameterTypes.AWS_Secret,
   },
   {
     key: SMTP_PORT_PARAMETER_KEY,
     aws_key: SMTP_PORT_AWS_KEY,
-    parameter_type: "aws_secret",
+    parameter_type: WorkflowParameterTypes.AWS_Secret,
   },
   {
     key: SMTP_USERNAME_PARAMETER_KEY,
     aws_key: SMTP_USERNAME_AWS_KEY,
-    parameter_type: "aws_secret",
+    parameter_type: WorkflowParameterTypes.AWS_Secret,
   },
   {
     key: SMTP_PASSWORD_PARAMETER_KEY,
     aws_key: SMTP_PASSWORD_AWS_KEY,
-    parameter_type: "aws_secret",
+    parameter_type: WorkflowParameterTypes.AWS_Secret,
   },
 ] as const;
 
@@ -1265,7 +1384,7 @@ function getAdditionalParametersForEmailBlock(
   parameters: Array<ParameterYAML>,
 ): Array<ParameterYAML> {
   const emailBlocks = blocks.filter(
-    (block) => block.block_type === "send_email",
+    (block) => block.block_type === WorkflowBlockTypes.SendEmail,
   );
   if (emailBlocks.length === 0) {
     return [];
@@ -1371,32 +1490,35 @@ function convertParametersToParameterYAML(
     const base = {
       key: parameter.key,
       description: parameter.description,
+      parameter_type: parameter.parameter_type,
     };
     switch (parameter.parameter_type) {
-      case "aws_secret": {
+      case WorkflowParameterTypes.AWS_Secret: {
         return {
           ...base,
-          parameter_type: "aws_secret",
+          parameter_type: WorkflowParameterTypes.AWS_Secret,
           aws_key: parameter.aws_key,
         };
       }
-      case "bitwarden_login_credential": {
+      case WorkflowParameterTypes.Bitwarden_Login_Credential: {
         return {
           ...base,
-          parameter_type: "bitwarden_login_credential",
+          parameter_type: WorkflowParameterTypes.Bitwarden_Login_Credential,
           bitwarden_collection_id: parameter.bitwarden_collection_id,
           url_parameter_key: parameter.url_parameter_key,
-          bitwarden_client_id_aws_secret_key: "SKYVERN_BITWARDEN_CLIENT_ID",
+          bitwarden_client_id_aws_secret_key:
+            parameter.bitwarden_client_id_aws_secret_key,
           bitwarden_client_secret_aws_secret_key:
-            "SKYVERN_BITWARDEN_CLIENT_SECRET",
+            parameter.bitwarden_client_secret_aws_secret_key,
           bitwarden_master_password_aws_secret_key:
-            "SKYVERN_BITWARDEN_MASTER_PASSWORD",
+            parameter.bitwarden_master_password_aws_secret_key,
         };
       }
-      case "bitwarden_sensitive_information": {
+      case WorkflowParameterTypes.Bitwarden_Sensitive_Information: {
         return {
           ...base,
-          parameter_type: "bitwarden_sensitive_information",
+          parameter_type:
+            WorkflowParameterTypes.Bitwarden_Sensitive_Information,
           bitwarden_collection_id: parameter.bitwarden_collection_id,
           bitwarden_identity_key: parameter.bitwarden_identity_key,
           bitwarden_identity_fields: parameter.bitwarden_identity_fields,
@@ -1408,17 +1530,31 @@ function convertParametersToParameterYAML(
             parameter.bitwarden_master_password_aws_secret_key,
         };
       }
-      case "context": {
+      case WorkflowParameterTypes.Bitwarden_Credit_Card_Data: {
         return {
           ...base,
-          parameter_type: "context",
+          parameter_type: WorkflowParameterTypes.Bitwarden_Credit_Card_Data,
+          bitwarden_collection_id: parameter.bitwarden_collection_id,
+          bitwarden_item_id: parameter.bitwarden_item_id,
+          bitwarden_client_id_aws_secret_key:
+            parameter.bitwarden_client_id_aws_secret_key,
+          bitwarden_client_secret_aws_secret_key:
+            parameter.bitwarden_client_secret_aws_secret_key,
+          bitwarden_master_password_aws_secret_key:
+            parameter.bitwarden_master_password_aws_secret_key,
+        };
+      }
+      case WorkflowParameterTypes.Context: {
+        return {
+          ...base,
+          parameter_type: WorkflowParameterTypes.Context,
           source_parameter_key: parameter.source.key,
         };
       }
-      case "workflow": {
+      case WorkflowParameterTypes.Workflow: {
         return {
           ...base,
-          parameter_type: "workflow",
+          parameter_type: WorkflowParameterTypes.Workflow,
           workflow_parameter_type: parameter.workflow_parameter_type,
           default_value: parameter.default_value,
         };
@@ -1456,6 +1592,18 @@ function convertBlocksToBlockYAML(
           totp_identifier: block.totp_identifier,
           totp_verification_url: block.totp_verification_url,
           cache_actions: block.cache_actions,
+        };
+        return blockYaml;
+      }
+      case "task_v2": {
+        const blockYaml: Taskv2BlockYAML = {
+          ...base,
+          block_type: "task_v2",
+          prompt: block.prompt,
+          url: block.url,
+          max_iterations: block.max_iterations,
+          totp_identifier: block.totp_identifier,
+          totp_verification_url: block.totp_verification_url,
         };
         return blockYaml;
       }
@@ -1576,6 +1724,7 @@ function convertBlocksToBlockYAML(
           loop_over_parameter_key: block.loop_over?.key ?? "",
           loop_blocks: convertBlocksToBlockYAML(block.loop_blocks),
           loop_variable_reference: block.loop_variable_reference,
+          complete_if_empty: block.complete_if_empty,
         };
         return blockYaml;
       }
@@ -1623,6 +1772,15 @@ function convertBlocksToBlockYAML(
         };
         return blockYaml;
       }
+      case "pdf_parser": {
+        const blockYaml: PDFParserBlockYAML = {
+          ...base,
+          block_type: "pdf_parser",
+          file_url: block.file_url,
+          json_schema: block.json_schema,
+        };
+        return blockYaml;
+      }
       case "send_email": {
         const blockYaml: SendEmailBlockYAML = {
           ...base,
@@ -1639,13 +1797,21 @@ function convertBlocksToBlockYAML(
         };
         return blockYaml;
       }
+      case "goto_url": {
+        const blockYaml: URLBlockYAML = {
+          ...base,
+          block_type: "goto_url",
+          url: block.url,
+        };
+        return blockYaml;
+      }
     }
   });
 }
 
 function convert(workflow: WorkflowApiResponse): WorkflowCreateYAMLRequest {
   const userParameters = workflow.workflow_definition.parameters.filter(
-    (parameter) => parameter.parameter_type !== "output",
+    (parameter) => parameter.parameter_type !== WorkflowParameterTypes.Output,
   );
   return {
     title: workflow.title,
@@ -1653,6 +1819,7 @@ function convert(workflow: WorkflowApiResponse): WorkflowCreateYAMLRequest {
     proxy_location: workflow.proxy_location,
     webhook_callback_url: workflow.webhook_callback_url,
     totp_verification_url: workflow.totp_verification_url,
+    persist_browser_session: workflow.persist_browser_session,
     workflow_definition: {
       parameters: convertParametersToParameterYAML(userParameters),
       blocks: convertBlocksToBlockYAML(workflow.workflow_definition.blocks),
@@ -1741,6 +1908,41 @@ function getWorkflowErrors(nodes: Array<AppNode>): Array<string> {
   extractionNodes.forEach((node) => {
     if (node.data.dataExtractionGoal.length === 0) {
       errors.push(`${node.data.label}: Data extraction goal is required.`);
+    }
+    try {
+      JSON.parse(node.data.dataSchema);
+    } catch {
+      errors.push(`${node.data.label}: Data schema is not valid JSON.`);
+    }
+  });
+
+  const textPromptNodes = nodes.filter(isTextPromptNode);
+  textPromptNodes.forEach((node) => {
+    try {
+      JSON.parse(node.data.jsonSchema);
+    } catch {
+      errors.push(`${node.data.label}: Data schema is not valid JSON.`);
+    }
+  });
+
+  const pdfParserNodes = nodes.filter(isPdfParserNode);
+  pdfParserNodes.forEach((node) => {
+    try {
+      JSON.parse(node.data.jsonSchema);
+    } catch {
+      errors.push(`${node.data.label}: Data schema is not valid JSON.`);
+    }
+  });
+
+  const waitNodes = nodes.filter(isWaitNode);
+  waitNodes.forEach((node) => {
+    const waitTimeString = node.data.waitInSeconds.trim();
+
+    const decimalRegex = new RegExp("^\\d+$");
+    const isNumber = decimalRegex.test(waitTimeString);
+
+    if (!isNumber) {
+      errors.push(`${node.data.label}: Invalid input for wait time.`);
     }
   });
 

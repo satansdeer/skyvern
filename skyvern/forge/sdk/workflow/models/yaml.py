@@ -7,6 +7,7 @@ from skyvern.config import settings
 from skyvern.forge.sdk.schemas.tasks import ProxyLocation
 from skyvern.forge.sdk.workflow.models.block import BlockType, FileType
 from skyvern.forge.sdk.workflow.models.parameter import ParameterType, WorkflowParameterType
+from skyvern.forge.sdk.workflow.models.workflow import WorkflowStatus
 
 
 class ParameterYAML(BaseModel, abc.ABC):
@@ -40,6 +41,11 @@ class BitwardenLoginCredentialParameterYAML(ParameterYAML):
     # bitwarden collection id to filter the login credentials from,
     # if not provided, no filtering will be done
     bitwarden_collection_id: str | None = None
+
+
+class CredentialParameterYAML(ParameterYAML):
+    parameter_type: Literal[ParameterType.CREDENTIAL] = ParameterType.CREDENTIAL  # type: ignore
+    credential_id: str
 
 
 class BitwardenSensitiveInformationParameterYAML(ParameterYAML):
@@ -145,6 +151,7 @@ class ForLoopBlockYAML(BlockYAML):
     loop_blocks: list["BLOCK_YAML_SUBCLASSES"]
     loop_over_parameter_key: str = ""
     loop_variable_reference: str | None = None
+    complete_if_empty: bool = False
 
 
 class CodeBlockYAML(BlockYAML):
@@ -213,6 +220,13 @@ class FileParserBlockYAML(BlockYAML):
 
     file_url: str
     file_type: FileType
+
+
+class PDFParserBlockYAML(BlockYAML):
+    block_type: Literal[BlockType.PDF_PARSER] = BlockType.PDF_PARSER  # type: ignore
+
+    file_url: str
+    json_schema: dict[str, Any] | None = None
 
 
 class ValidationBlockYAML(BlockYAML):
@@ -315,6 +329,15 @@ class UrlBlockYAML(BlockYAML):
     url: str
 
 
+class TaskV2BlockYAML(BlockYAML):
+    block_type: Literal[BlockType.TaskV2] = BlockType.TaskV2  # type: ignore
+    prompt: str
+    url: str | None = None
+    totp_verification_url: str | None = None
+    totp_identifier: str | None = None
+    max_iterations: int = 10
+
+
 PARAMETER_YAML_SUBCLASSES = (
     AWSSecretParameterYAML
     | BitwardenLoginCredentialParameterYAML
@@ -323,6 +346,7 @@ PARAMETER_YAML_SUBCLASSES = (
     | WorkflowParameterYAML
     | ContextParameterYAML
     | OutputParameterYAML
+    | CredentialParameterYAML
 )
 PARAMETER_YAML_TYPES = Annotated[PARAMETER_YAML_SUBCLASSES, Field(discriminator="parameter_type")]
 
@@ -343,6 +367,8 @@ BLOCK_YAML_SUBCLASSES = (
     | WaitBlockYAML
     | FileDownloadBlockYAML
     | UrlBlockYAML
+    | PDFParserBlockYAML
+    | TaskV2BlockYAML
 )
 BLOCK_YAML_TYPES = Annotated[BLOCK_YAML_SUBCLASSES, Field(discriminator="block_type")]
 
@@ -362,3 +388,4 @@ class WorkflowCreateYAMLRequest(BaseModel):
     persist_browser_session: bool = False
     workflow_definition: WorkflowDefinitionYAML
     is_saved_task: bool = False
+    status: WorkflowStatus = WorkflowStatus.published

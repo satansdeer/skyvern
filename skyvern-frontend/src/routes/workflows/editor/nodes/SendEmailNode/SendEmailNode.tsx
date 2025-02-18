@@ -1,5 +1,4 @@
 import { HelpTooltip } from "@/components/HelpTooltip";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { useDeleteNodeCallback } from "@/routes/workflows/hooks/useDeleteNodeCallback";
@@ -12,6 +11,9 @@ import { EditableNodeTitle } from "../components/EditableNodeTitle";
 import { NodeActionMenu } from "../NodeActionMenu";
 import { WorkflowBlockIcon } from "../WorkflowBlockIcon";
 import { type SendEmailNode } from "./types";
+import { WorkflowBlockInput } from "@/components/WorkflowBlockInput";
+import { WorkflowBlockInputTextarea } from "@/components/WorkflowBlockInputTextarea";
+import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
 
 function SendEmailNode({ id, data }: NodeProps<SendEmailNode>) {
   const { updateNodeData } = useReactFlow();
@@ -34,6 +36,8 @@ function SendEmailNode({ id, data }: NodeProps<SendEmailNode>) {
     setInputs({ ...inputs, [key]: value });
     updateNodeData(id, { [key]: value });
   }
+
+  const isFirstWorkflowBlock = useIsFirstBlockInWorkflow({ id });
 
   return (
     <div>
@@ -76,13 +80,18 @@ function SendEmailNode({ id, data }: NodeProps<SendEmailNode>) {
           />
         </div>
         <div className="space-y-2">
-          <Label className="text-xs text-slate-300">Recipients</Label>
-          <Input
-            onChange={(event) => {
-              if (!data.editable) {
-                return;
-              }
-              handleChange("recipients", event.target.value);
+          <div className="flex justify-between">
+            <Label className="text-xs text-slate-300">Recipients</Label>
+            {isFirstWorkflowBlock ? (
+              <div className="flex justify-end text-xs text-slate-400">
+                Tip: Use the {"+"} button to add parameters!
+              </div>
+            ) : null}
+          </div>
+          <WorkflowBlockInput
+            nodeId={id}
+            onChange={(value) => {
+              handleChange("recipients", value);
             }}
             value={inputs.recipients}
             placeholder="example@gmail.com, example2@gmail.com..."
@@ -92,12 +101,10 @@ function SendEmailNode({ id, data }: NodeProps<SendEmailNode>) {
         <Separator />
         <div className="space-y-2">
           <Label className="text-xs text-slate-300">Subject</Label>
-          <Input
-            onChange={(event) => {
-              if (!data.editable) {
-                return;
-              }
-              handleChange("subject", event.target.value);
+          <WorkflowBlockInput
+            nodeId={id}
+            onChange={(value) => {
+              handleChange("subject", value);
             }}
             value={inputs.subject}
             placeholder="What is the gist?"
@@ -106,12 +113,10 @@ function SendEmailNode({ id, data }: NodeProps<SendEmailNode>) {
         </div>
         <div className="space-y-2">
           <Label className="text-xs text-slate-300">Body</Label>
-          <Input
-            onChange={(event) => {
-              if (!data.editable) {
-                return;
-              }
-              handleChange("body", event.target.value);
+          <WorkflowBlockInputTextarea
+            nodeId={id}
+            onChange={(value) => {
+              handleChange("body", value);
             }}
             value={inputs.body}
             placeholder="What would you like to say?"
@@ -126,13 +131,11 @@ function SendEmailNode({ id, data }: NodeProps<SendEmailNode>) {
               content={helpTooltips["sendEmail"]["fileAttachments"]}
             />
           </div>
-          <Input
+          <WorkflowBlockInput
+            nodeId={id}
             value={inputs.fileAttachments}
-            onChange={(event) => {
-              if (!data.editable) {
-                return;
-              }
-              handleChange("fileAttachments", event.target.value);
+            onChange={(value) => {
+              handleChange("fileAttachments", value);
             }}
             disabled
             className="nopan text-xs"

@@ -126,6 +126,8 @@ function WorkflowRun() {
     });
   }
 
+  const isTaskv2Run = workflowRun && workflowRun.observer_task !== null;
+
   return (
     <div className="space-y-8">
       <header className="flex justify-between">
@@ -211,7 +213,7 @@ function WorkflowRun() {
               </DialogContent>
             </Dialog>
           )}
-          {workflowRunIsFinalized && (
+          {workflowRunIsFinalized && !isTaskv2Run && (
             <Button asChild>
               <Link
                 to={`/workflows/${workflowPermanentId}/run`}
@@ -265,7 +267,7 @@ function WorkflowRun() {
               handleSetActiveItem("stream");
             }}
             onObserverThoughtCardSelected={(item) => {
-              handleSetActiveItem(item.observer_thought_id);
+              handleSetActiveItem(item.thought_id);
             }}
           />
         </div>

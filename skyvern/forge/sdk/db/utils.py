@@ -43,6 +43,7 @@ from skyvern.forge.sdk.workflow.models.workflow import (
     WorkflowRunOutputParameter,
     WorkflowRunParameter,
     WorkflowRunStatus,
+    WorkflowStatus,
 )
 
 LOG = structlog.get_logger()
@@ -187,10 +188,13 @@ def convert_to_workflow(workflow_model: WorkflowModel, debug_enabled: bool = Fal
         created_at=workflow_model.created_at,
         modified_at=workflow_model.modified_at,
         deleted_at=workflow_model.deleted_at,
+        status=WorkflowStatus(workflow_model.status),
     )
 
 
-def convert_to_workflow_run(workflow_run_model: WorkflowRunModel, debug_enabled: bool = False) -> WorkflowRun:
+def convert_to_workflow_run(
+    workflow_run_model: WorkflowRunModel, workflow_title: str | None = None, debug_enabled: bool = False
+) -> WorkflowRun:
     if debug_enabled:
         LOG.debug(
             "Converting WorkflowRunModel to WorkflowRun",
@@ -200,6 +204,7 @@ def convert_to_workflow_run(workflow_run_model: WorkflowRunModel, debug_enabled:
     return WorkflowRun(
         workflow_run_id=workflow_run_model.workflow_run_id,
         workflow_permanent_id=workflow_run_model.workflow_permanent_id,
+        parent_workflow_run_id=workflow_run_model.parent_workflow_run_id,
         workflow_id=workflow_run_model.workflow_id,
         organization_id=workflow_run_model.organization_id,
         status=WorkflowRunStatus[workflow_run_model.status],
@@ -212,6 +217,7 @@ def convert_to_workflow_run(workflow_run_model: WorkflowRunModel, debug_enabled:
         totp_identifier=workflow_run_model.totp_identifier,
         created_at=workflow_run_model.created_at,
         modified_at=workflow_run_model.modified_at,
+        workflow_title=workflow_title,
     )
 
 
@@ -380,6 +386,7 @@ def convert_to_workflow_run_block(
     block = WorkflowRunBlock(
         workflow_run_block_id=workflow_run_block_model.workflow_run_block_id,
         workflow_run_id=workflow_run_block_model.workflow_run_id,
+        block_workflow_run_id=workflow_run_block_model.block_workflow_run_id,
         organization_id=workflow_run_block_model.organization_id,
         parent_workflow_run_block_id=workflow_run_block_model.parent_workflow_run_block_id,
         description=workflow_run_block_model.description,

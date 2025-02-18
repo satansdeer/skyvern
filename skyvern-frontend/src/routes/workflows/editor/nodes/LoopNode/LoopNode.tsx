@@ -19,6 +19,8 @@ import { NodeActionMenu } from "../NodeActionMenu";
 import { WorkflowBlockIcon } from "../WorkflowBlockIcon";
 import type { LoopNode } from "./types";
 import { useState } from "react";
+import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
+import { Checkbox } from "@/components/ui/checkbox";
 
 function LoopNode({ id, data }: NodeProps<LoopNode>) {
   const { updateNodeData } = useReactFlow();
@@ -31,6 +33,8 @@ function LoopNode({ id, data }: NodeProps<LoopNode>) {
     loopVariableReference: data.loopVariableReference,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
+
+  const isFirstWorkflowBlock = useIsFirstBlockInWorkflow({ id });
 
   const children = nodes.filter((node) => node.parentId === id);
   const furthestDownChild: Node | null = children.reduce(
@@ -50,6 +54,14 @@ function LoopNode({ id, data }: NodeProps<LoopNode>) {
     (furthestDownChild?.measured?.height ?? 0) +
     (furthestDownChild?.position.y ?? 0) +
     24;
+
+  function handleChange(key: string, value: unknown) {
+    if (!data.editable) {
+      return;
+    }
+    setInputs({ ...inputs, [key]: value });
+    updateNodeData(id, { [key]: value });
+  }
 
   return (
     <div>
@@ -99,21 +111,43 @@ function LoopNode({ id, data }: NodeProps<LoopNode>) {
               />
             </div>
             <div className="space-y-2">
-              <div className="flex gap-2">
-                <Label className="text-xs text-slate-300">Loop Value</Label>
-                <HelpTooltip content={helpTooltips["loop"]["loopValue"]} />
+              <div className="flex justify-between">
+                <div className="flex gap-2">
+                  <Label className="text-xs text-slate-300">Loop Value</Label>
+                  <HelpTooltip content={helpTooltips["loop"]["loopValue"]} />
+                </div>
+                {isFirstWorkflowBlock ? (
+                  <div className="flex justify-end text-xs text-slate-400">
+                    Tip: Use the {"+"} button to add parameters!
+                  </div>
+                ) : null}
               </div>
               <WorkflowBlockInput
                 nodeId={id}
                 value={inputs.loopVariableReference}
                 onChange={(value) => {
-                  setInputs({
-                    ...inputs,
-                    loopVariableReference: value,
-                  });
-                  updateNodeData(id, { loopVariableReference: value });
+                  handleChange("loopVariableReference", value);
                 }}
               />
+            </div>
+            <div className="space-y-2">
+              <div className="space-y-2">
+                <div className="flex gap-4">
+                  <div className="flex gap-2">
+                    <Label className="text-xs text-slate-300">
+                      Complete if Empty
+                    </Label>
+                    <HelpTooltip content="When checked, this block will successfully complete when the loop value is an empty list" />
+                  </div>
+                  <Checkbox
+                    checked={data.completeIfEmpty}
+                    disabled={!data.editable}
+                    onCheckedChange={(checked) => {
+                      handleChange("completeIfEmpty", checked);
+                    }}
+                  />
+                </div>
+              </div>
             </div>
           </div>
         </div>

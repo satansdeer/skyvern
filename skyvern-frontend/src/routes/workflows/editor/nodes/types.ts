@@ -17,6 +17,16 @@ export const dataSchemaExampleValue = {
   },
 } as const;
 
+export const dataSchemaExampleForFileExtraction = {
+  type: "object",
+  properties: {
+    output: {
+      type: "object",
+      description: "All of the information extracted from the file",
+    },
+  },
+};
+
 export const workflowBlockTitle: {
   [blockType in WorkflowBlockType]: string;
 } = {
@@ -35,4 +45,7 @@ export const workflowBlockTitle: {
   upload_to_s3: "Upload",
   validation: "Validation",
   wait: "Wait",
+  pdf_parser: "PDF Parser",
+  task_v2: "Task v2",
+  goto_url: "Go to URL",
 };

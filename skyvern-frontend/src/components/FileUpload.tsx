@@ -1,7 +1,7 @@
 import { getClient } from "@/api/AxiosClient";
 import { useCredentialGetter } from "@/hooks/useCredentialGetter";
 import { cn } from "@/util/utils";
-import { ReloadIcon } from "@radix-ui/react-icons";
+import { Cross2Icon, FileIcon, ReloadIcon } from "@radix-ui/react-icons";
 import { useMutation } from "@tanstack/react-query";
 import { useId, useState } from "react";
 import { Button } from "./ui/button";
@@ -113,11 +113,16 @@ function FileUpload({ value, onChange }: Props) {
       </TabsList>
       <TabsContent value="upload">
         {isManualUpload && ( // redundant check for ts compiler
-          <div className="flex h-full items-center gap-4">
+          <div className="flex h-full items-center gap-4 p-4">
             <a href={value.presignedUrl} className="underline">
-              <span>{file.name}</span>
+              <div className="flex gap-2">
+                <FileIcon className="size-6" />
+                <span>{file.name}</span>
+              </div>
             </a>
-            <Button onClick={() => reset()}>Change</Button>
+            <Button onClick={() => reset()} size="icon" variant="secondary">
+              <Cross2Icon />
+            </Button>
           </div>
         )}
         {value === null && (
@@ -126,6 +131,9 @@ function FileUpload({ value, onChange }: Props) {
             className={cn(
               "flex w-full cursor-pointer items-center justify-center border border-dashed py-8 hover:border-slate-500",
             )}
+            onDragOver={(event) => {
+              event.preventDefault();
+            }}
             onDrop={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -147,7 +155,7 @@ function FileUpload({ value, onChange }: Props) {
               id={inputId}
               type="file"
               onChange={handleFileChange}
-              accept=".csv"
+              accept=".csv,.pdf"
               className="hidden"
             />
             <div className="flex max-w-full gap-2 px-2">

@@ -25,6 +25,9 @@ class ActionType(StrEnum):
     SOLVE_CAPTCHA = "solve_captcha"
     TERMINATE = "terminate"
     COMPLETE = "complete"
+    RELOAD_PAGE = "reload_page"
+
+    EXTRACT = "extract"
 
     def is_web_action(self) -> bool:
         return self in [
@@ -72,6 +75,7 @@ class CompleteVerifyResult(BaseModel):
 
 
 class InputOrSelectContext(BaseModel):
+    intention: str | None = None
     field: str | None = None
     is_required: bool | None = None
     is_search_bar: bool | None = None  # don't trigger custom-selection logic when it's a search bar
@@ -79,7 +83,7 @@ class InputOrSelectContext(BaseModel):
     is_date_related: bool | None = None  # date picker mini agent requires some special logic
 
     def __repr__(self) -> str:
-        return f"InputOrSelectContext(field={self.field}, is_required={self.is_required}, is_search_bar={self.is_search_bar}, is_location_input={self.is_location_input})"
+        return f"InputOrSelectContext(field={self.field}, is_required={self.is_required}, is_search_bar={self.is_search_bar}, is_location_input={self.is_location_input}, intention={self.intention})"
 
 
 class Action(BaseModel):
@@ -116,6 +120,7 @@ class Action(BaseModel):
     text: str | None = None
     option: SelectOption | None = None
     is_checked: bool | None = None
+    verified: bool = False
 
     created_at: datetime | None = None
     modified_at: datetime | None = None
@@ -147,6 +152,8 @@ class Action(BaseModel):
                 return WaitAction.model_validate(value)
             elif action_type is ActionType.SOLVE_CAPTCHA:
                 return SolveCaptchaAction.model_validate(value)
+            elif action_type is ActionType.RELOAD_PAGE:
+                return ReloadPageAction.model_validate(value)
             else:
                 raise ValueError(f"Unsupported action type: {action_type}")
         else:
@@ -159,6 +166,11 @@ class WebAction(Action):
 
 class DecisiveAction(Action):
     errors: list[UserDefinedError] = []
+
+
+# TODO: consider to implement this as a WebAction in the future
+class ReloadPageAction(Action):
+    action_type: ActionType = ActionType.RELOAD_PAGE
 
 
 class ClickAction(WebAction):
@@ -238,6 +250,12 @@ class CompleteAction(DecisiveAction):
     action_type: ActionType = ActionType.COMPLETE
     verified: bool = False
     data_extraction_goal: str | None = None
+
+
+class ExtractAction(Action):
+    action_type: ActionType = ActionType.EXTRACT
+    data_extraction_goal: str | None = None
+    data_extraction_schema: dict[str, Any] | None = None
 
 
 class ScrapeResult(BaseModel):

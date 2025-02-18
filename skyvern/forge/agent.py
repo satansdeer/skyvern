@@ -4,7 +4,7 @@ import os
 import random
 import string
 from asyncio.exceptions import CancelledError
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -16,6 +16,7 @@ from playwright.async_api import Page
 from skyvern import analytics
 from skyvern.config import settings
 from skyvern.constants import (
+    BROWSER_DOWNLOADING_SUFFIX,
     GET_DOWNLOADED_FILES_TIMEOUT,
     SAVE_DOWNLOADED_FILES_TIMEOUT,
     SCRAPE_TYPE_ORDER,
@@ -24,6 +25,7 @@ from skyvern.constants import (
 )
 from skyvern.exceptions import (
     BrowserStateMissingPage,
+    DownloadFileMaxWaitingTime,
     EmptyScrapePage,
     FailedToNavigateToUrl,
     FailedToParseActionInstruction,
@@ -33,10 +35,12 @@ from skyvern.exceptions import (
     InvalidWorkflowTaskURLState,
     MissingBrowserState,
     MissingBrowserStatePage,
+    NoTOTPVerificationCodeFound,
     SkyvernException,
     StepTerminationError,
     StepUnableToExecuteError,
     TaskAlreadyCanceled,
+    TaskAlreadyTimeout,
     TaskNotFound,
     UnsupportedActionType,
     UnsupportedTaskType,
@@ -44,10 +48,16 @@ from skyvern.exceptions import (
 from skyvern.forge import app
 from skyvern.forge.async_operations import AgentPhase, AsyncOperationPool
 from skyvern.forge.prompts import prompt_engine
-from skyvern.forge.sdk.api.files import get_path_for_workflow_download_directory, list_files_in_directory, rename_file
+from skyvern.forge.sdk.api.files import (
+    get_path_for_workflow_download_directory,
+    list_downloading_files_in_directory,
+    list_files_in_directory,
+    rename_file,
+    wait_for_download_finished,
+)
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
-from skyvern.forge.sdk.core.security import generate_skyvern_signature
+from skyvern.forge.sdk.core.security import generate_skyvern_webhook_headers
 from skyvern.forge.sdk.db.enums import TaskType
 from skyvern.forge.sdk.log_artifacts import save_step_logs, save_task_logs
 from skyvern.forge.sdk.models import Step, StepStatus
@@ -58,10 +68,14 @@ from skyvern.forge.sdk.workflow.models.block import ActionBlock, BaseTaskBlock, 
 from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus
 from skyvern.webeye.actions.actions import (
     Action,
+    ActionStatus,
     ActionType,
     CompleteAction,
     CompleteVerifyResult,
     DecisiveAction,
+    ExtractAction,
+    ReloadPageAction,
+    TerminateAction,
     UserDefinedError,
     WebAction,
 )
@@ -69,7 +83,7 @@ from skyvern.webeye.actions.caching import retrieve_action_plan
 from skyvern.webeye.actions.handler import ActionHandler, poll_verification_code
 from skyvern.webeye.actions.models import AgentStepOutput, DetailedAgentStepOutput
 from skyvern.webeye.actions.parse_actions import parse_actions
-from skyvern.webeye.actions.responses import ActionResult
+from skyvern.webeye.actions.responses import ActionResult, ActionSuccess
 from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.scraper.scraper import ElementTreeFormat, ScrapedPage, scrape_website
 from skyvern.webeye.utils.page import SkyvernFrame
@@ -152,7 +166,7 @@ class ForgeAgent:
             navigation_goal=task_block.navigation_goal,
             data_extraction_goal=task_block.data_extraction_goal,
             navigation_payload=navigation_payload,
-            organization_id=workflow.organization_id,
+            organization_id=workflow_run.organization_id,
             proxy_location=workflow_run.proxy_location,
             extracted_information_schema=task_block.data_schema,
             workflow_run_id=workflow_run.workflow_run_id,
@@ -264,6 +278,23 @@ class ForgeAgent:
                 )
                 return step, None, None
 
+            if workflow_run and workflow_run.status == WorkflowRunStatus.timed_out:
+                LOG.info(
+                    "Workflow run is timed out, stopping execution inside task",
+                    workflow_run_id=workflow_run.workflow_run_id,
+                    step_id=step.step_id,
+                )
+                step = await self.update_step(
+                    step,
+                    status=StepStatus.canceled,
+                    is_last=True,
+                )
+                task = await self.update_task(
+                    task,
+                    status=TaskStatus.timed_out,
+                )
+                return step, None, None
+
         refreshed_task = await app.DATABASE.get_task(task_id=task.task_id, organization_id=organization.organization_id)
         if refreshed_task:
             task = refreshed_task
@@ -286,7 +317,7 @@ class ForgeAgent:
                 api_key=api_key,
                 need_call_webhook=True,
                 browser_session_id=browser_session_id,
-                close_browser_on_completion=close_browser_on_completion,
+                close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
             )
             return step, None, None
 
@@ -319,7 +350,33 @@ class ForgeAgent:
                 step,
                 browser_state,
                 detailed_output,
-            ) = await self._initialize_execution_state(task, step, workflow_run, browser_session_id)
+            ) = await self.initialize_execution_state(task, step, workflow_run, browser_session_id)
+
+            # mark step as completed and mark task as completed
+            if (
+                not task.navigation_goal
+                and not task.data_extraction_goal
+                and not task.complete_criterion
+                and not task.terminate_criterion
+            ):
+                # most likely a GOTO_URL task block
+                page = await browser_state.must_get_working_page()
+                current_url = page.url
+                if current_url.rstrip("/") != task.url.rstrip("/"):
+                    await page.goto(task.url)
+                step = await self.update_step(
+                    step, status=StepStatus.completed, is_last=True, output=AgentStepOutput(action_results=[])
+                )
+                task = await self.update_task(task, status=TaskStatus.completed)
+                await self.clean_up_task(
+                    task=task,
+                    last_step=step,
+                    api_key=api_key,
+                    need_call_webhook=True,
+                    close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
+                    browser_session_id=browser_session_id,
+                )
+                return step, detailed_output, None
 
             if page := await browser_state.get_working_page():
                 await self.register_async_operations(organization, task, page)
@@ -327,17 +384,37 @@ class ForgeAgent:
             step, detailed_output = await self.agent_step(
                 task, step, browser_state, organization=organization, task_block=task_block
             )
+            await app.AGENT_FUNCTION.post_step_execution(task, step)
             task = await self.update_task_errors_from_detailed_output(task, detailed_output)
             retry = False
 
             if task_block and task_block.complete_on_download and task.workflow_run_id:
                 workflow_download_directory = get_path_for_workflow_download_directory(task.workflow_run_id)
+
+                downloading_files: list[Path] = list_downloading_files_in_directory(workflow_download_directory)
+                if len(downloading_files) > 0:
+                    LOG.info(
+                        "Detecting files are still downloading, waiting for files to be completely downloaded.",
+                        downloading_files=downloading_files,
+                        step_id=step.step_id,
+                    )
+                    try:
+                        await wait_for_download_finished(downloading_files=downloading_files)
+                    except DownloadFileMaxWaitingTime as e:
+                        LOG.warning(
+                            "There're several long-time downloading files, these files might be broken",
+                            downloading_files=e.downloading_files,
+                            task_id=task.task_id,
+                            step_id=step.step_id,
+                            workflow_run_id=task.workflow_run_id,
+                        )
+
                 list_files_after = list_files_in_directory(workflow_download_directory)
                 if len(list_files_after) > len(list_files_before):
                     files_to_rename = list(set(list_files_after) - set(list_files_before))
                     for file in files_to_rename:
                         file_extension = Path(file).suffix
-                        if file_extension == ".crdownload":
+                        if file_extension == BROWSER_DOWNLOADING_SUFFIX:
                             LOG.warning(
                                 "Detecting incompleted download file, skip the rename",
                                 file=file,
@@ -368,7 +445,7 @@ class ForgeAgent:
                         task=completed_task,
                         last_step=last_step,
                         api_key=api_key,
-                        close_browser_on_completion=close_browser_on_completion,
+                        close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
                         browser_session_id=browser_session_id,
                     )
                     return last_step, detailed_output, None
@@ -385,7 +462,7 @@ class ForgeAgent:
                         task=task,
                         last_step=step,
                         api_key=api_key,
-                        close_browser_on_completion=close_browser_on_completion,
+                        close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
                         browser_session_id=browser_session_id,
                     )
                     return step, detailed_output, None
@@ -408,7 +485,7 @@ class ForgeAgent:
                         task=task,
                         last_step=last_step,
                         api_key=api_key,
-                        close_browser_on_completion=close_browser_on_completion,
+                        close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
                         browser_session_id=browser_session_id,
                     )
                     return last_step, detailed_output, None
@@ -471,6 +548,20 @@ class ForgeAgent:
                 step_id=step.step_id,
             )
             raise
+        except TaskAlreadyTimeout:
+            LOG.warning(
+                "Task is timed out, stopping execution",
+                task_id=task.task_id,
+                step=step.step_id,
+            )
+            await self.clean_up_task(
+                task=task,
+                last_step=step,
+                api_key=api_key,
+                close_browser_on_completion=browser_session_id is None,
+                browser_session_id=browser_session_id,
+            )
+            return step, detailed_output, None
         except StepTerminationError as e:
             LOG.warning(
                 "Step cannot be executed, marking task as failed",
@@ -484,7 +575,7 @@ class ForgeAgent:
                     task=task,
                     last_step=step,
                     api_key=api_key,
-                    close_browser_on_completion=close_browser_on_completion,
+                    close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
                     browser_session_id=browser_session_id,
                 )
             else:
@@ -519,7 +610,7 @@ class ForgeAgent:
                     task=task,
                     last_step=step,
                     api_key=api_key,
-                    close_browser_on_completion=close_browser_on_completion,
+                    close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
                     need_final_screenshot=False,
                     browser_session_id=browser_session_id,
                 )
@@ -541,6 +632,7 @@ class ForgeAgent:
                 api_key=api_key,
                 need_call_webhook=False,
                 browser_session_id=browser_session_id,
+                close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
             )
             return step, detailed_output, None
         except InvalidTaskStatusTransition:
@@ -556,7 +648,7 @@ class ForgeAgent:
                 api_key=api_key,
                 need_call_webhook=False,
                 browser_session_id=browser_session_id,
-                close_browser_on_completion=close_browser_on_completion,
+                close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
             )
             return step, detailed_output, None
         except (UnsupportedActionType, UnsupportedTaskType, FailedToParseActionInstruction) as e:
@@ -574,7 +666,7 @@ class ForgeAgent:
                 api_key=api_key,
                 need_call_webhook=False,
                 browser_session_id=browser_session_id,
-                close_browser_on_completion=close_browser_on_completion,
+                close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
             )
             return step, detailed_output, None
 
@@ -595,7 +687,7 @@ class ForgeAgent:
                     task=task,
                     last_step=step,
                     api_key=api_key,
-                    close_browser_on_completion=close_browser_on_completion,
+                    close_browser_on_completion=close_browser_on_completion and browser_session_id is None,
                     browser_session_id=browser_session_id,
                 )
             else:
@@ -675,7 +767,7 @@ class ForgeAgent:
             (
                 scraped_page,
                 extract_action_prompt,
-            ) = await self._build_and_record_step_prompt(
+            ) = await self.build_and_record_step_prompt(
                 task,
                 step,
                 browser_state,
@@ -687,19 +779,7 @@ class ForgeAgent:
 
             using_cached_action_plan = False
             if not task.navigation_goal and not isinstance(task_block, ValidationBlock):
-                actions = [
-                    CompleteAction(
-                        reasoning="Task has no navigation goal.",
-                        data_extraction_goal=task.data_extraction_goal,
-                        organization_id=task.organization_id,
-                        task_id=task.task_id,
-                        workflow_run_id=task.workflow_run_id,
-                        step_id=step.step_id,
-                        step_order=step.order,
-                        action_order=0,
-                        confidence_float=1.0,
-                    )
-                ]
+                actions = [await self.create_extract_action(task, step, scraped_page)]
             elif (
                 task_block
                 and task_block.cache_actions
@@ -710,19 +790,33 @@ class ForgeAgent:
                 self.async_operation_pool.run_operation(task.task_id, AgentPhase.llm)
                 json_response = await app.LLM_API_HANDLER(
                     prompt=extract_action_prompt,
+                    prompt_name="extract-actions",
                     step=step,
                     screenshots=scraped_page.screenshots,
                 )
-                json_response = await self.handle_potential_verification_code(
-                    task,
-                    step,
-                    scraped_page,
-                    browser_state,
-                    json_response,
-                )
-                detailed_agent_step_output.llm_response = json_response
-
-                actions = parse_actions(task, step.step_id, step.order, scraped_page, json_response["actions"])
+                try:
+                    json_response = await self.handle_potential_verification_code(
+                        task,
+                        step,
+                        scraped_page,
+                        browser_state,
+                        json_response,
+                    )
+                    detailed_agent_step_output.llm_response = json_response
+                    actions = parse_actions(task, step.step_id, step.order, scraped_page, json_response["actions"])
+                except NoTOTPVerificationCodeFound:
+                    actions = [
+                        TerminateAction(
+                            organization_id=task.organization_id,
+                            workflow_run_id=task.workflow_run_id,
+                            task_id=task.task_id,
+                            step_id=step.step_id,
+                            step_order=step.order,
+                            action_order=0,
+                            reasoning="No TOTP verification code found. Going to terminate.",
+                            intention="No TOTP verification code found. Going to terminate.",
+                        )
+                    ]
 
             detailed_agent_step_output.actions = actions
             if len(actions) == 0:
@@ -800,6 +894,35 @@ class ForgeAgent:
 
             element_id_to_last_action: dict[str, int] = dict()
             for action_idx, action_node in enumerate(action_linked_list):
+                context = skyvern_context.ensure_context()
+                if context.refresh_working_page:
+                    LOG.warning(
+                        "Detected the signal to reload the page, going to reload and skip the rest of the actions",
+                        task_id=task.task_id,
+                        step_id=step.step_id,
+                        step_order=step.order,
+                    )
+                    await browser_state.reload_page()
+                    context.refresh_working_page = False
+                    action_result = ActionSuccess()
+                    action_result.step_order = step.order
+                    action_result.step_retry_number = step.retry_index
+                    detailed_agent_step_output.actions_and_results[action_idx] = (
+                        ReloadPageAction(
+                            reasoning="Something wrong with the current page, reload to continue",
+                            status=ActionStatus.completed,
+                            organization_id=task.organization_id,
+                            workflow_run_id=task.workflow_run_id,
+                            task_id=task.task_id,
+                            step_id=step.step_id,
+                            step_order=step.order,
+                            action_order=action_idx,
+                        ),
+                        [action_result],
+                    )
+                    await self.record_artifacts_after_action(task, step, browser_state)
+                    break
+
                 action = action_node.action
                 if isinstance(action, WebAction):
                     previous_action_idx = element_id_to_last_action.get(action.element_id)
@@ -976,6 +1099,21 @@ class ForgeAgent:
                         )
                         detailed_agent_step_output.actions_and_results.append((complete_action, complete_results))
                         await self.record_artifacts_after_action(task, step, browser_state)
+
+            # if the last action is complete and is successful, check if there's a data extraction goal
+            # if task has navigation goal and extraction goal at the same time, handle ExtractAction before marking step as completed
+            if (
+                task.navigation_goal
+                and task.data_extraction_goal
+                and self.step_has_completed_goal(detailed_agent_step_output)
+            ):
+                working_page = await browser_state.must_get_working_page()
+                extract_action = await self.create_extract_action(task, step, scraped_page)
+                extract_results = await ActionHandler.handle_action(
+                    scraped_page, task, step, working_page, extract_action
+                )
+                detailed_agent_step_output.actions_and_results.append((extract_action, extract_results))
+
             # If no action errors return the agent state and output
             completed_step = await self.update_step(
                 step=step,
@@ -1037,7 +1175,10 @@ class ForgeAgent:
 
         # this prompt is critical to our agent so let's use the primary LLM API handler
         verification_result = await app.LLM_API_HANDLER(
-            prompt=verification_prompt, step=step, screenshots=scraped_page_refreshed.screenshots
+            prompt=verification_prompt,
+            step=step,
+            screenshots=scraped_page_refreshed.screenshots,
+            prompt_name="check-user-goal",
         )
         return CompleteVerifyResult.model_validate(verification_result)
 
@@ -1125,7 +1266,7 @@ class ForgeAgent:
                 exc_info=True,
             )
 
-    async def _initialize_execution_state(
+    async def initialize_execution_state(
         self,
         task: Task,
         step: Step,
@@ -1202,7 +1343,7 @@ class ForgeAgent:
             scrape_exclude=app.scrape_exclude,
         )
 
-    async def _build_and_record_step_prompt(
+    async def build_and_record_step_prompt(
         self,
         task: Task,
         step: Step,
@@ -1322,8 +1463,10 @@ class ForgeAgent:
         elif task_type == TaskType.validation:
             template = "decisive-criterion-validate"
         elif task_type == TaskType.action:
-            prompt = prompt_engine.load_prompt("infer-action-type", navigation_goal=navigation_goal)
-            json_response = await app.LLM_API_HANDLER(prompt=prompt, step=step)
+            prompt = prompt_engine.load_prompt(
+                "infer-action-type", navigation_goal=navigation_goal, prompt_name="infer-action-type"
+            )
+            json_response = await app.LLM_API_HANDLER(prompt=prompt, step=step, prompt_name="infer-action-type")
             if json_response.get("error"):
                 raise FailedToParseActionInstruction(
                     reason=json_response.get("thought"), error_type=json_response.get("error")
@@ -1359,8 +1502,8 @@ class ForgeAgent:
             error_code_mapping_str=(json.dumps(task.error_code_mapping) if task.error_code_mapping else None),
             local_datetime=datetime.now(context.tz_info).isoformat(),
             verification_code_check=verification_code_check,
-            complete_criterion=task.complete_criterion,
-            terminate_criterion=task.terminate_criterion,
+            complete_criterion=task.complete_criterion.strip() if task.complete_criterion else None,
+            terminate_criterion=task.terminate_criterion.strip() if task.terminate_criterion else None,
         )
 
     def _build_navigation_payload(
@@ -1427,6 +1570,7 @@ class ForgeAgent:
         """
         Find the last successful ScrapeAction for the task and return the extracted information.
         """
+        # TODO: make sure we can get extracted information with the ExtractAction change
         steps = await app.DATABASE.get_task_steps(
             task_id=task.task_id,
             organization_id=task.organization_id,
@@ -1437,7 +1581,7 @@ class ForgeAgent:
             if not step.output or not step.output.actions_and_results:
                 continue
             for action, action_results in step.output.actions_and_results:
-                if action.action_type != ActionType.COMPLETE:
+                if action.action_type != ActionType.EXTRACT:
                     continue
 
                 for action_result in action_results:
@@ -1603,17 +1747,8 @@ class ForgeAgent:
         task_response = await self.build_task_response(task=task, last_step=last_step)
 
         # send task_response to the webhook callback url
-        timestamp = str(int(datetime.utcnow().timestamp()))
         payload = task_response.model_dump_json(exclude={"request"})
-        signature = generate_skyvern_signature(
-            payload=payload,
-            api_key=api_key,
-        )
-        headers = {
-            "x-skyvern-timestamp": timestamp,
-            "x-skyvern-signature": signature,
-            "Content-Type": "application/json",
-        }
+        headers = generate_skyvern_webhook_headers(payload=payload, api_key=api_key)
         LOG.info(
             "Sending task response to webhook callback url",
             task_id=task.task_id,
@@ -1622,9 +1757,10 @@ class ForgeAgent:
             headers=headers,
         )
         try:
-            resp = await httpx.AsyncClient().post(
-                task.webhook_callback_url, data=payload, headers=headers, timeout=httpx.Timeout(30.0)
-            )
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    task.webhook_callback_url, data=payload, headers=headers, timeout=httpx.Timeout(30.0)
+                )
             if resp.status_code == 200:
                 LOG.info(
                     "Webhook sent successfully",
@@ -1832,6 +1968,18 @@ class ForgeAgent:
             diff=update_comparison,
         )
 
+        # Track step duration when step is completed or failed
+        if status in [StepStatus.completed, StepStatus.failed]:
+            duration_seconds = (datetime.now(UTC) - step.created_at.replace(tzinfo=UTC)).total_seconds()
+            LOG.info(
+                "Step duration metrics",
+                task_id=step.task_id,
+                step_id=step.step_id,
+                duration_seconds=duration_seconds,
+                step_status=status,
+                organization_id=step.organization_id,
+            )
+
         await save_step_logs(step.step_id)
 
         return await app.DATABASE.update_step(
@@ -1866,6 +2014,19 @@ class ForgeAgent:
             for key, value in updates.items()
             if getattr(task, key) != value
         }
+
+        # Track task duration when task is completed, failed, or terminated
+        if status in [TaskStatus.completed, TaskStatus.failed, TaskStatus.terminated]:
+            duration_seconds = (datetime.now(UTC) - task.created_at.replace(tzinfo=UTC)).total_seconds()
+            LOG.info(
+                "Task duration metrics",
+                task_id=task.task_id,
+                workflow_run_id=task.workflow_run_id,
+                duration_seconds=duration_seconds,
+                task_status=status,
+                organization_id=task.organization_id,
+            )
+
         await save_task_logs(task.task_id)
         LOG.info("Updating task in db", task_id=task.task_id, diff=update_comparison)
         return await app.DATABASE.update_task(
@@ -1958,7 +2119,9 @@ class ForgeAgent:
                 navigation_payload=task.navigation_payload,
                 steps=steps_results,
             )
-            json_response = await app.LLM_API_HANDLER(prompt=prompt, screenshots=screenshots, step=step)
+            json_response = await app.LLM_API_HANDLER(
+                prompt=prompt, screenshots=screenshots, step=step, prompt_name="summarize-max-steps-reason"
+            )
             return json_response.get("reasoning", "")
         except Exception:
             LOG.warning("Failed to summary the failure reason", task_id=task.task_id, step_id=step.step_id)
@@ -2116,6 +2279,7 @@ class ForgeAgent:
                 prompt=extract_action_prompt,
                 step=step,
                 screenshots=scraped_page.screenshots,
+                prompt_name="extract-actions",
             )
         return json_response
 
@@ -2142,3 +2306,41 @@ class ForgeAgent:
             organization_id=task.organization_id,
             errors=task_errors,
         )
+
+    @staticmethod
+    async def create_extract_action(task: Task, step: Step, scraped_page: ScrapedPage) -> ExtractAction:
+        context = skyvern_context.ensure_context()
+        # generate reasoning by prompt llm to think briefly what data to extract
+        prompt = prompt_engine.load_prompt(
+            "data-extraction-summary",
+            data_extraction_goal=task.data_extraction_goal,
+            data_extraction_schema=task.extracted_information_schema,
+            current_url=scraped_page.url,
+            local_datetime=datetime.now(context.tz_info).isoformat(),
+        )
+
+        data_extraction_summary_resp = await app.SECONDARY_LLM_API_HANDLER(
+            prompt=prompt, step=step, screenshots=scraped_page.screenshots, prompt_name="data-extraction-summary"
+        )
+        return ExtractAction(
+            reasoning=data_extraction_summary_resp.get("summary", "Extracting information from the page"),
+            data_extraction_goal=task.data_extraction_goal,
+            organization_id=task.organization_id,
+            task_id=task.task_id,
+            workflow_run_id=task.workflow_run_id,
+            step_id=step.step_id,
+            step_order=step.order,
+            action_order=0,
+            confidence_float=1.0,
+        )
+
+    @staticmethod
+    def step_has_completed_goal(detailed_agent_step_output: DetailedAgentStepOutput) -> bool:
+        if not detailed_agent_step_output.actions_and_results:
+            return False
+
+        last_action, last_action_results = detailed_agent_step_output.actions_and_results[-1]
+        if last_action.action_type not in [ActionType.COMPLETE, ActionType.EXTRACT]:
+            return False
+
+        return any(action_result.success for action_result in last_action_results)

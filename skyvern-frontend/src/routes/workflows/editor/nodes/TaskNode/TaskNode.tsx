@@ -34,6 +34,8 @@ import { dataSchemaExampleValue, errorMappingExampleValue } from "../types";
 import { WorkflowBlockIcon } from "../WorkflowBlockIcon";
 import { ParametersMultiSelect } from "./ParametersMultiSelect";
 import type { TaskNode } from "./types";
+import { WorkflowDataSchemaInputGroup } from "@/components/DataSchemaInputGroup/WorkflowDataSchemaInputGroup";
+import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
 
 function TaskNode({ id, data }: NodeProps<TaskNode>) {
   const { updateNodeData } = useReactFlow();
@@ -42,6 +44,7 @@ function TaskNode({ id, data }: NodeProps<TaskNode>) {
   const nodes = useNodes<AppNode>();
   const edges = useEdges();
   const outputParameterKeys = getAvailableOutputParameterKeys(nodes, edges, id);
+  const isFirstWorkflowBlock = useIsFirstBlockInWorkflow({ id });
 
   const [label, setLabel] = useNodeLabelChangeHandler({
     id,
@@ -120,9 +123,16 @@ function TaskNode({ id, data }: NodeProps<TaskNode>) {
             <AccordionContent className="pl-[1.5rem] pr-1">
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <Label className="text-xs text-slate-300">URL</Label>
-                    <HelpTooltip content={helpTooltips["task"]["url"]} />
+                  <div className="flex justify-between">
+                    <div className="flex gap-2">
+                      <Label className="text-xs text-slate-300">URL</Label>
+                      <HelpTooltip content={helpTooltips["task"]["url"]} />
+                    </div>
+                    {isFirstWorkflowBlock ? (
+                      <div className="flex justify-end text-xs text-slate-400">
+                        Tip: Use the {"+"} button to add parameters!
+                      </div>
+                    ) : null}
                   </div>
                   <WorkflowBlockInputTextarea
                     nodeId={id}
@@ -186,42 +196,18 @@ function TaskNode({ id, data }: NodeProps<TaskNode>) {
                     className="nopan text-xs"
                   />
                 </div>
-                <div className="space-y-2">
-                  <div className="flex gap-4">
-                    <div className="flex gap-2">
-                      <Label className="text-xs text-slate-300">
-                        Data Schema
-                      </Label>
-                      <HelpTooltip
-                        content={helpTooltips["task"]["dataSchema"]}
-                      />
-                    </div>
-                    <Checkbox
-                      checked={inputs.dataSchema !== "null"}
-                      onCheckedChange={(checked) => {
-                        handleChange(
-                          "dataSchema",
-                          checked
-                            ? JSON.stringify(dataSchemaExampleValue, null, 2)
-                            : "null",
-                        );
-                      }}
-                    />
-                  </div>
-                  {inputs.dataSchema !== "null" && (
-                    <div>
-                      <CodeEditor
-                        language="json"
-                        value={inputs.dataSchema}
-                        onChange={(value) => {
-                          handleChange("dataSchema", value);
-                        }}
-                        className="nowheel nopan"
-                        fontSize={8}
-                      />
-                    </div>
-                  )}
-                </div>
+                <WorkflowDataSchemaInputGroup
+                  exampleValue={dataSchemaExampleValue}
+                  onChange={(value) => {
+                    handleChange("dataSchema", value);
+                  }}
+                  value={inputs.dataSchema}
+                  suggestionContext={{
+                    data_extraction_goal: inputs.dataExtractionGoal,
+                    current_schema: inputs.dataSchema,
+                    navigation_goal: inputs.navigationGoal,
+                  }}
+                />
               </div>
             </AccordionContent>
           </AccordionItem>
@@ -401,25 +387,6 @@ function TaskNode({ id, data }: NodeProps<TaskNode>) {
                   />
                 </div>
                 <Separator />
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <Label className="text-xs text-slate-300">
-                      2FA Verification URL
-                    </Label>
-                    <HelpTooltip
-                      content={helpTooltips["task"]["totpVerificationUrl"]}
-                    />
-                  </div>
-                  <WorkflowBlockInputTextarea
-                    nodeId={id}
-                    onChange={(value) => {
-                      handleChange("totpVerificationUrl", value);
-                    }}
-                    value={inputs.totpVerificationUrl ?? ""}
-                    placeholder={placeholders["task"]["totpVerificationUrl"]}
-                    className="nopan text-xs"
-                  />
-                </div>
                 <div className="space-y-2">
                   <div className="flex gap-2">
                     <Label className="text-xs text-slate-300">

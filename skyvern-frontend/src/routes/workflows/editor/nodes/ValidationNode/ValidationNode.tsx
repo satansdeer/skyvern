@@ -14,7 +14,14 @@ import { CodeEditor } from "@/routes/workflows/components/CodeEditor";
 import { useDeleteNodeCallback } from "@/routes/workflows/hooks/useDeleteNodeCallback";
 import { useNodeLabelChangeHandler } from "@/routes/workflows/hooks/useLabelChangeHandler";
 import { WorkflowBlockTypes } from "@/routes/workflows/types/workflowTypes";
-import { Handle, NodeProps, Position, useReactFlow } from "@xyflow/react";
+import {
+  Handle,
+  NodeProps,
+  Position,
+  useEdges,
+  useNodes,
+  useReactFlow,
+} from "@xyflow/react";
 import { useState } from "react";
 import { helpTooltips } from "../../helpContent";
 import { EditableNodeTitle } from "../components/EditableNodeTitle";
@@ -22,6 +29,10 @@ import { NodeActionMenu } from "../NodeActionMenu";
 import { errorMappingExampleValue } from "../types";
 import { WorkflowBlockIcon } from "../WorkflowBlockIcon";
 import type { ValidationNode } from "./types";
+import { AppNode } from "..";
+import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
+import { ParametersMultiSelect } from "../TaskNode/ParametersMultiSelect";
+import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
 
 function ValidationNode({ id, data }: NodeProps<ValidationNode>) {
   const { updateNodeData } = useReactFlow();
@@ -36,6 +47,9 @@ function ValidationNode({ id, data }: NodeProps<ValidationNode>) {
     errorCodeMapping: data.errorCodeMapping,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
+  const nodes = useNodes<AppNode>();
+  const edges = useEdges();
+  const outputParameterKeys = getAvailableOutputParameterKeys(nodes, edges, id);
 
   function handleChange(key: string, value: unknown) {
     if (!editable) {
@@ -44,6 +58,8 @@ function ValidationNode({ id, data }: NodeProps<ValidationNode>) {
     setInputs({ ...inputs, [key]: value });
     updateNodeData(id, { [key]: value });
   }
+
+  const isFirstWorkflowBlock = useIsFirstBlockInWorkflow({ id });
 
   return (
     <div>
@@ -86,7 +102,14 @@ function ValidationNode({ id, data }: NodeProps<ValidationNode>) {
           />
         </header>
         <div className="space-y-2">
-          <Label className="text-xs text-slate-300">Complete if...</Label>
+          <div className="flex justify-between">
+            <Label className="text-xs text-slate-300">Complete if...</Label>
+            {isFirstWorkflowBlock ? (
+              <div className="flex justify-end text-xs text-slate-400">
+                Tip: Use the {"+"} button to add parameters!
+              </div>
+            ) : null}
+          </div>
           <WorkflowBlockInputTextarea
             nodeId={id}
             onChange={(value) => {
@@ -115,6 +138,15 @@ function ValidationNode({ id, data }: NodeProps<ValidationNode>) {
             </AccordionTrigger>
             <AccordionContent>
               <div className="ml-6 mt-4 space-y-4">
+                <div className="space-y-2">
+                  <ParametersMultiSelect
+                    availableOutputParameters={outputParameterKeys}
+                    parameters={data.parameterKeys}
+                    onParametersChange={(parameterKeys) => {
+                      updateNodeData(id, { parameterKeys });
+                    }}
+                  />
+                </div>
                 <div className="space-y-2">
                   <div className="flex gap-4">
                     <div className="flex gap-2">

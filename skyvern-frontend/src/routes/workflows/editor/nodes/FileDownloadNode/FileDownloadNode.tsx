@@ -15,13 +15,24 @@ import { CodeEditor } from "@/routes/workflows/components/CodeEditor";
 import { useDeleteNodeCallback } from "@/routes/workflows/hooks/useDeleteNodeCallback";
 import { useNodeLabelChangeHandler } from "@/routes/workflows/hooks/useLabelChangeHandler";
 import { DownloadIcon } from "@radix-ui/react-icons";
-import { Handle, NodeProps, Position, useReactFlow } from "@xyflow/react";
+import {
+  Handle,
+  NodeProps,
+  Position,
+  useEdges,
+  useNodes,
+  useReactFlow,
+} from "@xyflow/react";
 import { useState } from "react";
 import { helpTooltips, placeholders } from "../../helpContent";
 import { EditableNodeTitle } from "../components/EditableNodeTitle";
 import { NodeActionMenu } from "../NodeActionMenu";
 import { errorMappingExampleValue } from "../types";
 import type { FileDownloadNode } from "./types";
+import { AppNode } from "..";
+import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
+import { ParametersMultiSelect } from "../TaskNode/ParametersMultiSelect";
+import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
 
 const urlTooltip =
   "The URL Skyvern is navigating to. Leave this field blank to pick up from where the last block left off.";
@@ -50,6 +61,12 @@ function FileDownloadNode({ id, data }: NodeProps<FileDownloadNode>) {
     totpIdentifier: data.totpIdentifier,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
+
+  const nodes = useNodes<AppNode>();
+  const edges = useEdges();
+  const outputParameterKeys = getAvailableOutputParameterKeys(nodes, edges, id);
+
+  const isFirstWorkflowBlock = useIsFirstBlockInWorkflow({ id });
 
   function handleChange(key: string, value: unknown) {
     if (!editable) {
@@ -100,9 +117,16 @@ function FileDownloadNode({ id, data }: NodeProps<FileDownloadNode>) {
         </header>
         <div className="space-y-4">
           <div className="space-y-2">
-            <div className="flex gap-2">
-              <Label className="text-xs text-slate-300">URL</Label>
-              <HelpTooltip content={urlTooltip} />
+            <div className="flex justify-between">
+              <div className="flex gap-2">
+                <Label className="text-xs text-slate-300">URL</Label>
+                <HelpTooltip content={urlTooltip} />
+              </div>
+              {isFirstWorkflowBlock ? (
+                <div className="flex justify-end text-xs text-slate-400">
+                  Tip: Use the {"+"} button to add parameters!
+                </div>
+              ) : null}
             </div>
             <WorkflowBlockInputTextarea
               nodeId={id}
@@ -141,6 +165,15 @@ function FileDownloadNode({ id, data }: NodeProps<FileDownloadNode>) {
             </AccordionTrigger>
             <AccordionContent className="pl-6 pr-1 pt-1">
               <div className="space-y-4">
+                <div className="space-y-2">
+                  <ParametersMultiSelect
+                    availableOutputParameters={outputParameterKeys}
+                    parameters={data.parameterKeys}
+                    onParametersChange={(parameterKeys) => {
+                      updateNodeData(id, { parameterKeys });
+                    }}
+                  />
+                </div>
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">
@@ -284,27 +317,6 @@ function FileDownloadNode({ id, data }: NodeProps<FileDownloadNode>) {
                   />
                 </div>
                 <Separator />
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <Label className="text-xs text-slate-300">
-                      2FA Verification URL
-                    </Label>
-                    <HelpTooltip
-                      content={helpTooltips["download"]["totpVerificationUrl"]}
-                    />
-                  </div>
-                  <WorkflowBlockInputTextarea
-                    nodeId={id}
-                    onChange={(value) => {
-                      handleChange("totpVerificationUrl", value);
-                    }}
-                    value={inputs.totpVerificationUrl ?? ""}
-                    placeholder={
-                      placeholders["download"]["totpVerificationUrl"]
-                    }
-                    className="nopan text-xs"
-                  />
-                </div>
                 <div className="space-y-2">
                   <div className="flex gap-2">
                     <Label className="text-xs text-slate-300">

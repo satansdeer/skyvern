@@ -5,7 +5,7 @@ from litellm import AllowedFailsPolicy
 
 from skyvern.forge.sdk.models import Step
 from skyvern.forge.sdk.schemas.ai_suggestions import AISuggestion
-from skyvern.forge.sdk.schemas.observers import ObserverCruise, ObserverThought
+from skyvern.forge.sdk.schemas.observers import ObserverTask, ObserverThought
 from skyvern.forge.sdk.settings_manager import SettingsManager
 
 
@@ -36,7 +36,9 @@ class LLMConfigBase:
 @dataclass(frozen=True)
 class LLMConfig(LLMConfigBase):
     litellm_params: Optional[LiteLLMParams] = field(default=None)
-    max_output_tokens: int = SettingsManager.get_settings().LLM_CONFIG_MAX_TOKENS
+    max_completion_tokens: int = SettingsManager.get_settings().LLM_CONFIG_MAX_TOKENS
+    temperature: float | None = SettingsManager.get_settings().LLM_CONFIG_TEMPERATURE
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,15 +74,18 @@ class LLMRouterConfig(LLMConfigBase):
     allowed_fails: int | None = None
     allowed_fails_policy: AllowedFailsPolicy | None = None
     cooldown_time: float | None = None
-    max_output_tokens: int = SettingsManager.get_settings().LLM_CONFIG_MAX_TOKENS
+    max_completion_tokens: int = SettingsManager.get_settings().LLM_CONFIG_MAX_TOKENS
+    reasoning_effort: str | None = None
+    temperature: float | None = SettingsManager.get_settings().LLM_CONFIG_TEMPERATURE
 
 
 class LLMAPIHandler(Protocol):
     def __call__(
         self,
         prompt: str,
+        prompt_name: str,
         step: Step | None = None,
-        observer_cruise: ObserverCruise | None = None,
+        observer_cruise: ObserverTask | None = None,
         observer_thought: ObserverThought | None = None,
         ai_suggestion: AISuggestion | None = None,
         screenshots: list[bytes] | None = None,

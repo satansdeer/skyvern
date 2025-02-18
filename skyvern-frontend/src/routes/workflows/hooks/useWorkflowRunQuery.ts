@@ -7,17 +7,28 @@ import {
 } from "@/routes/tasks/types";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
+import { useGlobalWorkflowsQuery } from "./useGlobalWorkflowsQuery";
 
 function useWorkflowRunQuery() {
   const { workflowRunId, workflowPermanentId } = useParams();
   const credentialGetter = useCredentialGetter();
+  const { data: globalWorkflows } = useGlobalWorkflowsQuery();
 
   return useQuery<WorkflowRunStatusApiResponse>({
     queryKey: ["workflowRun", workflowPermanentId, workflowRunId],
     queryFn: async () => {
       const client = await getClient(credentialGetter);
+      const isGlobalWorkflow = globalWorkflows?.some(
+        (workflow) => workflow.workflow_permanent_id === workflowPermanentId,
+      );
+      const params = new URLSearchParams();
+      if (isGlobalWorkflow) {
+        params.set("template", "true");
+      }
       return client
-        .get(`/workflows/${workflowPermanentId}/runs/${workflowRunId}`)
+        .get(`/workflows/${workflowPermanentId}/runs/${workflowRunId}`, {
+          params,
+        })
         .then((response) => response.data);
     },
     refetchInterval: (query) => {
@@ -42,6 +53,7 @@ function useWorkflowRunQuery() {
       }
       return statusIsRunningOrQueued(query.state.data);
     },
+    enabled: !!globalWorkflows && !!workflowPermanentId && !!workflowRunId,
   });
 }
 

@@ -23,7 +23,7 @@ from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.models import Step
 from skyvern.forge.sdk.schemas.ai_suggestions import AISuggestion
-from skyvern.forge.sdk.schemas.observers import ObserverCruise, ObserverThought
+from skyvern.forge.sdk.schemas.observers import ObserverTask, ObserverThought
 
 LOG = structlog.get_logger()
 
@@ -61,8 +61,9 @@ class LLMAPIHandlerFactory:
 
         async def llm_api_handler_with_router_and_fallback(
             prompt: str,
+            prompt_name: str,
             step: Step | None = None,
-            observer_cruise: ObserverCruise | None = None,
+            observer_cruise: ObserverTask | None = None,
             observer_thought: ObserverThought | None = None,
             ai_suggestion: AISuggestion | None = None,
             screenshots: list[bytes] | None = None,
@@ -80,6 +81,8 @@ class LLMAPIHandlerFactory:
             Returns:
                 The response from the LLM router.
             """
+            start_time = time.time()
+
             if parameters is None:
                 parameters = LLMAPIHandlerFactory.get_api_parameters(llm_config)
 
@@ -120,7 +123,6 @@ class LLMAPIHandlerFactory:
             )
             try:
                 response = await router.acompletion(model=main_model_group, messages=messages, **parameters)
-                LOG.info("LLM API call successful", llm_key=llm_key, model=llm_config.model_name)
             except litellm.exceptions.APIError as e:
                 raise LLMProviderErrorRetryableTask(llm_key) from e
             except ValueError as e:
@@ -146,22 +148,37 @@ class LLMAPIHandlerFactory:
                 observer_thought=observer_thought,
                 ai_suggestion=ai_suggestion,
             )
-            if step:
+            if step or observer_thought:
                 try:
                     llm_cost = litellm.completion_cost(completion_response=response)
                 except Exception as e:
                     LOG.exception("Failed to calculate LLM cost", error=str(e))
                     llm_cost = 0
                 prompt_tokens = response.get("usage", {}).get("prompt_tokens", 0)
-                completion_tokens = response.get("usage", {}).get("completion_tokens", 0)
-                await app.DATABASE.update_step(
-                    task_id=step.task_id,
-                    step_id=step.step_id,
-                    organization_id=step.organization_id,
-                    incremental_cost=llm_cost,
-                    incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
-                    incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
-                )
+
+                # TODO (suchintan): Properly support reasoning tokens
+                reasoning_tokens = response.get("usage", {}).get("reasoning_tokens", 0)
+                LOG.info("Reasoning tokens", reasoning_tokens=reasoning_tokens)
+
+                completion_tokens = response.get("usage", {}).get("completion_tokens", 0) + reasoning_tokens
+
+                if step:
+                    await app.DATABASE.update_step(
+                        task_id=step.task_id,
+                        step_id=step.step_id,
+                        organization_id=step.organization_id,
+                        incremental_cost=llm_cost,
+                        incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
+                        incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
+                    )
+                if observer_thought:
+                    await app.DATABASE.update_observer_thought(
+                        observer_thought_id=observer_thought.observer_thought_id,
+                        organization_id=observer_thought.organization_id,
+                        input_token_count=prompt_tokens if prompt_tokens > 0 else None,
+                        output_token_count=completion_tokens if completion_tokens > 0 else None,
+                        thought_cost=llm_cost,
+                    )
             parsed_response = parse_api_response(response, llm_config.add_assistant_prefix)
             await app.ARTIFACT_MANAGER.create_llm_artifact(
                 data=json.dumps(parsed_response, indent=2).encode("utf-8"),
@@ -185,6 +202,21 @@ class LLMAPIHandlerFactory:
                     ai_suggestion=ai_suggestion,
                 )
 
+            # Track LLM API handler duration
+            duration_seconds = time.time() - start_time
+            LOG.info(
+                "LLM API handler duration metrics",
+                llm_key=llm_key,
+                model=main_model_group,
+                prompt_name=prompt_name,
+                duration_seconds=duration_seconds,
+                step_id=step.step_id if step else None,
+                observer_thought_id=observer_thought.observer_thought_id if observer_thought else None,
+                organization_id=step.organization_id
+                if step
+                else (observer_thought.organization_id if observer_thought else None),
+            )
+
             return parsed_response
 
         return llm_api_handler_with_router_and_fallback
@@ -200,13 +232,15 @@ class LLMAPIHandlerFactory:
 
         async def llm_api_handler(
             prompt: str,
+            prompt_name: str,
             step: Step | None = None,
-            observer_cruise: ObserverCruise | None = None,
+            observer_cruise: ObserverTask | None = None,
             observer_thought: ObserverThought | None = None,
             ai_suggestion: AISuggestion | None = None,
             screenshots: list[bytes] | None = None,
             parameters: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
+            start_time = time.time()
             active_parameters = base_parameters or {}
             if parameters is None:
                 parameters = LLMAPIHandlerFactory.get_api_parameters(llm_config)
@@ -260,14 +294,12 @@ class LLMAPIHandlerFactory:
                 # TODO (kerem): add a timeout to this call
                 # TODO (kerem): add a retry mechanism to this call (acompletion_with_retries)
                 # TODO (kerem): use litellm fallbacks? https://litellm.vercel.app/docs/tutorials/fallbacks#how-does-completion_with_fallbacks-work
-                LOG.info("Calling LLM API", llm_key=llm_key, model=llm_config.model_name)
                 response = await litellm.acompletion(
                     model=llm_config.model_name,
                     messages=messages,
                     timeout=settings.LLM_CONFIG_TIMEOUT,
                     **active_parameters,
                 )
-                LOG.info("LLM API call successful", llm_key=llm_key, model=llm_config.model_name)
             except litellm.exceptions.APIError as e:
                 raise LLMProviderErrorRetryableTask(llm_key) from e
             except CancelledError:
@@ -292,7 +324,7 @@ class LLMAPIHandlerFactory:
                 ai_suggestion=ai_suggestion,
             )
 
-            if step:
+            if step or observer_thought:
                 try:
                     llm_cost = litellm.completion_cost(completion_response=response)
                 except Exception as e:
@@ -300,14 +332,23 @@ class LLMAPIHandlerFactory:
                     llm_cost = 0
                 prompt_tokens = response.get("usage", {}).get("prompt_tokens", 0)
                 completion_tokens = response.get("usage", {}).get("completion_tokens", 0)
-                await app.DATABASE.update_step(
-                    task_id=step.task_id,
-                    step_id=step.step_id,
-                    organization_id=step.organization_id,
-                    incremental_cost=llm_cost,
-                    incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
-                    incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
-                )
+                if step:
+                    await app.DATABASE.update_step(
+                        task_id=step.task_id,
+                        step_id=step.step_id,
+                        organization_id=step.organization_id,
+                        incremental_cost=llm_cost,
+                        incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
+                        incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
+                    )
+                if observer_thought:
+                    await app.DATABASE.update_observer_thought(
+                        observer_thought_id=observer_thought.observer_thought_id,
+                        organization_id=observer_thought.organization_id,
+                        input_token_count=prompt_tokens if prompt_tokens > 0 else None,
+                        output_token_count=completion_tokens if completion_tokens > 0 else None,
+                        thought_cost=llm_cost,
+                    )
             parsed_response = parse_api_response(response, llm_config.add_assistant_prefix)
             await app.ARTIFACT_MANAGER.create_llm_artifact(
                 data=json.dumps(parsed_response, indent=2).encode("utf-8"),
@@ -331,16 +372,36 @@ class LLMAPIHandlerFactory:
                     ai_suggestion=ai_suggestion,
                 )
 
+            # Track LLM API handler duration
+            duration_seconds = time.time() - start_time
+            LOG.info(
+                "LLM API handler duration metrics",
+                llm_key=llm_key,
+                prompt_name=prompt_name,
+                model=llm_config.model_name,
+                duration_seconds=duration_seconds,
+                step_id=step.step_id if step else None,
+                observer_thought_id=observer_thought.observer_thought_id if observer_thought else None,
+                organization_id=step.organization_id
+                if step
+                else (observer_thought.organization_id if observer_thought else None),
+            )
+
             return parsed_response
 
         return llm_api_handler
 
     @staticmethod
     def get_api_parameters(llm_config: LLMConfig | LLMRouterConfig) -> dict[str, Any]:
-        return {
-            "max_tokens": llm_config.max_output_tokens,
-            "temperature": settings.LLM_CONFIG_TEMPERATURE,
-        }
+        params: dict[str, Any] = {"max_completion_tokens": llm_config.max_completion_tokens}
+
+        if llm_config.temperature is not None:
+            params["temperature"] = llm_config.temperature
+
+        if llm_config.reasoning_effort is not None:
+            params["reasoning_effort"] = llm_config.reasoning_effort
+
+        return params
 
     @classmethod
     def register_custom_handler(cls, llm_key: str, handler: LLMAPIHandler) -> None:

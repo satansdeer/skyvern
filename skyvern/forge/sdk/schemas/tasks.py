@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator
 
-from skyvern.exceptions import InvalidTaskStatusTransition, TaskAlreadyCanceled
+from skyvern.exceptions import InvalidTaskStatusTransition, TaskAlreadyCanceled, TaskAlreadyTimeout
 from skyvern.forge.sdk.core.validators import validate_url
 from skyvern.forge.sdk.db.enums import TaskType
 
@@ -25,6 +25,7 @@ class ProxyLocation(StrEnum):
     RESIDENTIAL_IN = "RESIDENTIAL_IN"
     RESIDENTIAL_JP = "RESIDENTIAL_JP"
     RESIDENTIAL_FR = "RESIDENTIAL_FR"
+    RESIDENTIAL_DE = "RESIDENTIAL_DE"
     NONE = "NONE"
 
 
@@ -63,10 +64,13 @@ def get_tzinfo_from_proxy(proxy_location: ProxyLocation) -> ZoneInfo | None:
         return ZoneInfo("Asia/Kolkata")
 
     if proxy_location == ProxyLocation.RESIDENTIAL_JP:
-        return ZoneInfo("Asia/Kolkata")
+        return ZoneInfo("Asia/Tokyo")
 
     if proxy_location == ProxyLocation.RESIDENTIAL_FR:
         return ZoneInfo("Europe/Paris")
+
+    if proxy_location == ProxyLocation.RESIDENTIAL_DE:
+        return ZoneInfo("Europe/Berlin")
 
     return None
 
@@ -277,6 +281,8 @@ class Task(TaskBase):
         if not old_status.can_update_to(status):
             if old_status == TaskStatus.canceled:
                 raise TaskAlreadyCanceled(new_status=status, task_id=self.task_id)
+            if old_status == TaskStatus.timed_out:
+                raise TaskAlreadyTimeout(task_id=self.task_id)
             raise InvalidTaskStatusTransition(old_status=old_status, new_status=status, task_id=self.task_id)
 
         if status.requires_failure_reason() and failure_reason is None:

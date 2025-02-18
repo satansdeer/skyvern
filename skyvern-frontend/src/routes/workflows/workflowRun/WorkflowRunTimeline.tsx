@@ -14,7 +14,7 @@ import {
   WorkflowRunOverviewActiveElement,
 } from "./WorkflowRunOverview";
 import { ScrollArea, ScrollAreaViewport } from "@/components/ui/scroll-area";
-import { statusIsNotFinalized } from "@/routes/tasks/types";
+import { statusIsFinalized, statusIsNotFinalized } from "@/routes/tasks/types";
 import { cn } from "@/util/utils";
 import { ThoughtCard } from "./ThoughtCard";
 import { WorkflowRunTimelineBlockItem } from "./WorkflowRunTimelineBlockItem";
@@ -54,7 +54,9 @@ function WorkflowRunTimeline({
     return null;
   }
 
+  // bit redundant but better read
   const workflowRunIsNotFinalized = statusIsNotFinalized(workflowRun);
+  const workflowRunIsFinalized = statusIsFinalized(workflowRun);
 
   const numberOfActions = workflowRunTimeline.reduce((total, current) => {
     if (isTaskVariantBlockItem(current)) {
@@ -77,7 +79,7 @@ function WorkflowRunTimeline({
         </div>
       </div>
       <ScrollArea>
-        <ScrollAreaViewport className="max-h-[37rem]">
+        <ScrollAreaViewport className="h-[37rem] max-h-[37rem]">
           <div className="space-y-4">
             {workflowRunIsNotFinalized && (
               <div
@@ -96,7 +98,7 @@ function WorkflowRunTimeline({
                 </div>
               </div>
             )}
-            {workflowRunTimeline.length === 0 && (
+            {workflowRunIsFinalized && workflowRunTimeline.length === 0 && (
               <div>Workflow timeline is empty</div>
             )}
             {workflowRunTimeline?.map((timelineItem) => {
@@ -117,11 +119,10 @@ function WorkflowRunTimeline({
               if (isThoughtItem(timelineItem)) {
                 return (
                   <ThoughtCard
-                    key={timelineItem.thought.observer_thought_id}
+                    key={timelineItem.thought.thought_id}
                     active={
                       isObserverThought(activeItem) &&
-                      activeItem.observer_thought_id ===
-                        timelineItem.thought.observer_thought_id
+                      activeItem.thought_id === timelineItem.thought.thought_id
                     }
                     onClick={onObserverThoughtCardSelected}
                     thought={timelineItem.thought}

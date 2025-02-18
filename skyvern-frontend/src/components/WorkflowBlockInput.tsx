@@ -24,7 +24,7 @@ function WorkflowBlockInput(props: Props) {
       <div className="absolute right-0 top-0 flex size-9 cursor-pointer items-center justify-center">
         <Popover>
           <PopoverTrigger asChild>
-            <div className="rounded p-1 hover:bg-muted" title="Add a parameter">
+            <div className="rounded p-1 hover:bg-muted">
               <PlusIcon className="size-4" />
             </div>
           </PopoverTrigger>

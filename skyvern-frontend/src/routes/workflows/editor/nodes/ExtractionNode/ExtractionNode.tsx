@@ -6,15 +6,20 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import { CodeEditor } from "@/routes/workflows/components/CodeEditor";
 import { useDeleteNodeCallback } from "@/routes/workflows/hooks/useDeleteNodeCallback";
 import { useNodeLabelChangeHandler } from "@/routes/workflows/hooks/useLabelChangeHandler";
-import { Handle, NodeProps, Position, useReactFlow } from "@xyflow/react";
+import {
+  Handle,
+  NodeProps,
+  Position,
+  useEdges,
+  useNodes,
+  useReactFlow,
+} from "@xyflow/react";
 import { useState } from "react";
 import { EditableNodeTitle } from "../components/EditableNodeTitle";
 import { NodeActionMenu } from "../NodeActionMenu";
@@ -23,6 +28,11 @@ import type { ExtractionNode } from "./types";
 
 import { WorkflowBlockInputTextarea } from "@/components/WorkflowBlockInputTextarea";
 import { helpTooltips, placeholders } from "../../helpContent";
+import { AppNode } from "..";
+import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
+import { ParametersMultiSelect } from "../TaskNode/ParametersMultiSelect";
+import { WorkflowDataSchemaInputGroup } from "@/components/DataSchemaInputGroup/WorkflowDataSchemaInputGroup";
+import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
 
 function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
   const { updateNodeData } = useReactFlow();
@@ -41,6 +51,11 @@ function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
     cacheActions: data.cacheActions,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
+  const nodes = useNodes<AppNode>();
+  const edges = useEdges();
+  const outputParameterKeys = getAvailableOutputParameterKeys(nodes, edges, id);
+
+  const isFirstWorkflowBlock = useIsFirstBlockInWorkflow({ id });
 
   function handleChange(key: string, value: unknown) {
     if (!editable) {
@@ -88,14 +103,22 @@ function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
           />
         </header>
         <div className="space-y-2">
-          <div className="flex gap-2">
-            <Label className="text-xs text-slate-300">
-              Data Extraction Goal
-            </Label>
-            <HelpTooltip
-              content={helpTooltips["extraction"]["dataExtractionGoal"]}
-            />
+          <div className="flex justify-between">
+            <div className="flex gap-2">
+              <Label className="text-xs text-slate-300">
+                Data Extraction Goal
+              </Label>
+              <HelpTooltip
+                content={helpTooltips["extraction"]["dataExtractionGoal"]}
+              />
+            </div>
+            {isFirstWorkflowBlock ? (
+              <div className="flex justify-end text-xs text-slate-400">
+                Tip: Use the {"+"} button to add parameters!
+              </div>
+            ) : null}
           </div>
+
           <WorkflowBlockInputTextarea
             nodeId={id}
             onChange={(value) => {
@@ -109,44 +132,17 @@ function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
             className="nopan text-xs"
           />
         </div>
-        <div className="space-y-2">
-          <div className="flex gap-4">
-            <div className="flex gap-2">
-              <Label className="text-xs text-slate-300">Data Schema</Label>
-              <HelpTooltip content={helpTooltips["extraction"]["dataSchema"]} />
-            </div>
-            <Checkbox
-              checked={inputs.dataSchema !== "null"}
-              onCheckedChange={(checked) => {
-                if (!editable) {
-                  return;
-                }
-                handleChange(
-                  "dataSchema",
-                  checked
-                    ? JSON.stringify(dataSchemaExampleValue, null, 2)
-                    : "null",
-                );
-              }}
-            />
-          </div>
-          {inputs.dataSchema !== "null" && (
-            <div>
-              <CodeEditor
-                language="json"
-                value={inputs.dataSchema}
-                onChange={(value) => {
-                  if (!editable) {
-                    return;
-                  }
-                  handleChange("dataSchema", value);
-                }}
-                className="nowheel nopan"
-                fontSize={8}
-              />
-            </div>
-          )}
-        </div>
+        <WorkflowDataSchemaInputGroup
+          value={inputs.dataSchema}
+          onChange={(value) => {
+            handleChange("dataSchema", value);
+          }}
+          exampleValue={dataSchemaExampleValue}
+          suggestionContext={{
+            data_extraction_goal: inputs.dataExtractionGoal,
+            current_schema: inputs.dataSchema,
+          }}
+        />
         <Separator />
         <Accordion type="single" collapsible>
           <AccordionItem value="advanced" className="border-b-0">
@@ -155,6 +151,15 @@ function ExtractionNode({ id, data }: NodeProps<ExtractionNode>) {
             </AccordionTrigger>
             <AccordionContent className="pl-6 pr-1 pt-1">
               <div className="space-y-4">
+                <div className="space-y-2">
+                  <ParametersMultiSelect
+                    availableOutputParameters={outputParameterKeys}
+                    parameters={data.parameterKeys}
+                    onParametersChange={(parameterKeys) => {
+                      updateNodeData(id, { parameterKeys });
+                    }}
+                  />
+                </div>
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">

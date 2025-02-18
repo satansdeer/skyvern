@@ -15,7 +15,7 @@ function ThoughtCard({ thought, onClick, active }: Props) {
     if (element && active) {
       element.scrollIntoView({
         behavior: "smooth",
-        block: "center",
+        block: "start",
       });
     }
     // this should only run once at mount.
@@ -38,7 +38,7 @@ function ThoughtCard({ thought, onClick, active }: Props) {
       <div className="flex justify-between">
         <div className="flex gap-3">
           <BrainIcon className="size-6" />
-          <span>Thinking</span>
+          <span>Thought</span>
         </div>
         <div className="flex items-center gap-1 rounded-sm bg-slate-elevation5 px-2 py-1">
           <QuestionMarkIcon className="size-4" />
